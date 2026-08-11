@@ -1,0 +1,5 @@
+/* The status LED on nice!nano-compatible Pro Micro boards is active-low. */
+&led0 {
+	gpios = <&gpio0 15 GPIO_ACTIVE_LOW>;
+	label = "Blue LED";
+};
