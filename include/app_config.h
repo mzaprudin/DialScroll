@@ -36,14 +36,12 @@
 #define ENCODER_SCROLL_DIRECTION             1
 
 /*
- * HID Resolution Multiplier divides every legacy Wheel detent into smaller
- * units without changing the resulting scroll distance. The host selects the
- * multiplier through the Feature report; unsupported hosts keep using one
- * report unit per detent.
+ * The HID descriptor advertises x16. Runtime modes can coarsen those x16 units
+ * to x8 or legacy x1 without changing the resulting scroll distance. The host
+ * selects whether it understands high-resolution units through the Feature
+ * report; unsupported hosts keep using one report unit per detent.
  */
 #define BLE_HID_WHEEL_RESOLUTION_MULTIPLIER  16U
-#define ENCODER_COUNTS_PER_SCROLL_STEP       \
-	(ENCODER_COUNTS_PER_SCROLL_DETENT / BLE_HID_WHEEL_RESOLUTION_MULTIPLIER)
 
 /* Do not flood USB CDC while sampling the encoder at 500 Hz. */
 #define ENCODER_DIAGNOSTIC_BURST_COUNT       20U

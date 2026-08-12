@@ -9,6 +9,7 @@ target_sources(app PRIVATE
   src/main.c
   src/encoder.c
   src/encoder_math.c
+  src/scroll_resolution.c
   src/ble_hid.c
   src/battery.c
   src/battery_math.c

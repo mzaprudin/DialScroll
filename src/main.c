@@ -11,6 +11,7 @@
 #include "battery.h"
 #include "diagnostics.h"
 #include "encoder.h"
+#include "scroll_resolution.h"
 
 LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
 
@@ -129,6 +130,11 @@ int main(void)
 	err = diagnostics_init();
 	if (err < 0) {
 		LOG_ERR("Runtime diagnostics initialization failed: %d", err);
+	}
+
+	err = scroll_resolution_init();
+	if (err < 0) {
+		LOG_ERR("Scroll resolution initialization failed: %d", err);
 	}
 
 	if (IS_ENABLED(CONFIG_BLESCROLL_ENCODER_STARTUP_DIAGNOSTIC)) {

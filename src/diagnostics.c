@@ -9,6 +9,7 @@
 #include "battery.h"
 #include "ble_hid.h"
 #include "encoder.h"
+#include "scroll_resolution.h"
 
 #if defined(CONFIG_BLESCROLL_RUNTIME_DIAGNOSTICS)
 #include <nrfx_power.h>
@@ -86,8 +87,37 @@ static void diagnostic_enable(void)
 
 	atomic_set(&diagnostic_enabled, 1);
 	printk("\r\n=== blescroll diagnostics enabled ===\r\n");
-	printk("Commands: D = enable/snapshot, d = disable\r\n");
 	diagnostic_snapshot_print();
+}
+
+static void diagnostic_help_print(void)
+{
+	printk("\r\n=== blescroll commands ===\r\n");
+	printk("D  enable diagnostics / print snapshot\r\n");
+	printk("d  disable diagnostics\r\n");
+	printk("h  print this help\r\n");
+	printk("0  Wheel resolution off (legacy x1)\r\n");
+	printk("1  Wheel resolution x8\r\n");
+	printk("2  Wheel resolution x16 (default)\r\n");
+	printk("Current resolution: %u (%s)\r\n",
+	       (unsigned int)scroll_resolution_get(),
+	       scroll_resolution_name_get());
+}
+
+static void diagnostic_resolution_set(uint8_t command)
+{
+	const enum scroll_resolution_mode mode =
+		(enum scroll_resolution_mode)(command - '0');
+	const int err = scroll_resolution_set(mode);
+
+	if (err < 0) {
+		printk("\r\nScroll resolution change failed: %d\r\n", err);
+		return;
+	}
+
+	printk("\r\nScroll resolution saved: %u (%s)\r\n",
+	       (unsigned int)scroll_resolution_get(),
+	       scroll_resolution_name_get());
 }
 
 static void diagnostic_disable(bool acknowledge)
@@ -122,6 +152,10 @@ static void diagnostic_command_work_handler(struct k_work *work)
 			diagnostic_enable();
 		} else if (command == 'd') {
 			diagnostic_disable(true);
+		} else if (command == 'h') {
+			diagnostic_help_print();
+		} else if ((command >= '0') && (command <= '2')) {
+			diagnostic_resolution_set(command);
 		}
 	}
 }
@@ -140,7 +174,9 @@ static void diagnostic_uart_callback(const struct device *dev, void *user_data)
 
 		length = uart_fifo_read(dev, received, sizeof(received));
 		for (int index = 0; index < length; ++index) {
-			if ((received[index] == 'D') || (received[index] == 'd')) {
+			if ((received[index] == 'D') || (received[index] == 'd') ||
+			    (received[index] == 'h') ||
+			    ((received[index] >= '0') && (received[index] <= '2'))) {
 				if (k_msgq_put(&diagnostic_command_queue,
 					       &received[index], K_NO_WAIT) == 0) {
 					(void)k_work_submit(&diagnostic_command_work);

@@ -12,8 +12,6 @@ BUILD_ASSERT(ENCODER_VOUT_MAX_CODE <= ENCODER_ADC_MAX_CODE,
 	     "VOUT calibration range must fit the ADC");
 BUILD_ASSERT(ENCODER_FILTER_SAMPLE_COUNT > (2U * ENCODER_FILTER_DISCARD_COUNT),
 	     "The trimmed mean must retain at least one ADC sample");
-BUILD_ASSERT(ENCODER_COUNTS_PER_SCROLL_STEP > 0,
-	     "Encoder-to-scroll scale must be positive");
 BUILD_ASSERT((ENCODER_COUNTS_PER_SCROLL_DETENT %
 	      BLE_HID_WHEEL_RESOLUTION_MULTIPLIER) == 0,
 	     "A Wheel detent must contain a whole number of high-resolution units");
@@ -96,23 +94,30 @@ int encoder_angle_filter(const uint16_t samples[ENCODER_FILTER_SAMPLE_COUNT],
 	return 0;
 }
 
-int32_t encoder_scroll_accumulate(int16_t delta, int32_t *remainder)
+int32_t encoder_scroll_accumulate(int16_t delta, uint8_t resolution_multiplier,
+				  int32_t *remainder)
 {
 	const int32_t directed_delta = (int32_t)delta * ENCODER_SCROLL_DIRECTION;
+	int32_t counts_per_step;
+	int32_t report_units_per_step;
 	int32_t scroll_delta;
 
-	if (remainder == NULL) {
+	if ((remainder == NULL) || (resolution_multiplier == 0U) ||
+	    ((BLE_HID_WHEEL_RESOLUTION_MULTIPLIER % resolution_multiplier) != 0U) ||
+	    ((ENCODER_COUNTS_PER_SCROLL_DETENT % resolution_multiplier) != 0U)) {
 		return 0;
 	}
+	counts_per_step = ENCODER_COUNTS_PER_SCROLL_DETENT / resolution_multiplier;
+	report_units_per_step =
+		BLE_HID_WHEEL_RESOLUTION_MULTIPLIER / resolution_multiplier;
 
 	*remainder += directed_delta;
-	/* Keep the division signed. ENCODER_COUNTS_PER_SCROLL_STEP is derived
-	 * from configuration constants that may be unsigned; allowing the usual
-	 * integer conversions here turns a negative remainder into a huge positive
-	 * Wheel value.
-	 */
-	scroll_delta = *remainder / (int32_t)ENCODER_COUNTS_PER_SCROLL_STEP;
-	*remainder -= scroll_delta * ENCODER_COUNTS_PER_SCROLL_STEP;
+	scroll_delta = *remainder / counts_per_step;
+	*remainder -= scroll_delta * counts_per_step;
 
-	return scroll_delta;
+	/* The HID descriptor always advertises x16 as its maximum. Lower runtime
+	 * modes preserve total distance by emitting coarser chunks: x8 emits two
+	 * x16 units and legacy/off emits sixteen x16 units at a time.
+	 */
+	return scroll_delta * report_units_per_step;
 }

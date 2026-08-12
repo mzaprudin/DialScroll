@@ -19,6 +19,7 @@
 #include <zephyr/sys/util.h>
 
 #include "app_config.h"
+#include "scroll_resolution.h"
 
 LOG_MODULE_REGISTER(ble_hid, LOG_LEVEL_INF);
 
@@ -608,12 +609,15 @@ void ble_hid_diagnostic_print(void)
 	retries = scroll_retry_count;
 	k_mutex_unlock(&connection_mutex);
 
-	printk("ble: %s security=L%u report-mode=%s high-resolution=%s "
-	       "multiplier=x%u\r\n",
+	printk("ble: %s security=L%u report-mode=%s host-high-resolution=%s "
+	       "descriptor-multiplier=x%u\r\n",
 	       connected ? "connected" : "not-connected", security_level,
 	       current_report_mode ? "yes" : "no",
 	       high_resolution ? "enabled" : "disabled",
 	       high_resolution ? BLE_HID_WHEEL_RESOLUTION_MULTIPLIER : 1U);
+	printk("scroll resolution: mode=%u (%s), persistent=yes\r\n",
+	       (unsigned int)scroll_resolution_get(),
+	       scroll_resolution_name_get());
 	if (interval != 0U) {
 		const uint32_t interval_hundredths_ms = (uint32_t)interval * 125U;
 

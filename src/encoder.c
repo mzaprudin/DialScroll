@@ -18,6 +18,7 @@
 #include "ble_hid.h"
 #include "diagnostics.h"
 #include "encoder_math.h"
+#include "scroll_resolution.h"
 
 LOG_MODULE_REGISTER(encoder, LOG_LEVEL_INF);
 
@@ -169,6 +170,7 @@ static void encoder_diagnostic_burst_log(uint16_t angle, int16_t delta,
 
 static void encoder_motion_process(uint16_t angle, int16_t delta,
 				   int32_t *scroll_remainder,
+				   uint8_t *scroll_multiplier,
 				   int64_t *last_diagnostic_ms,
 				   uint32_t *diagnostic_burst_remaining)
 {
@@ -181,7 +183,18 @@ static void encoder_motion_process(uint16_t angle, int16_t delta,
 		*scroll_remainder = 0;
 		scroll_delta = 0;
 	} else {
-		scroll_delta = encoder_scroll_accumulate(delta, scroll_remainder);
+		const uint8_t current_multiplier =
+			scroll_resolution_multiplier_get();
+
+		if (*scroll_multiplier != current_multiplier) {
+			/* Do not reinterpret a partial step accumulated using the old
+			 * granularity. Already queued HID units remain valid x16 units.
+			 */
+			*scroll_remainder = 0;
+			*scroll_multiplier = current_multiplier;
+		}
+		scroll_delta = encoder_scroll_accumulate(
+			delta, current_multiplier, scroll_remainder);
 	}
 
 	if (scroll_delta != 0) {
@@ -201,6 +214,7 @@ static void encoder_motion_process(uint16_t angle, int16_t delta,
 
 static uint16_t encoder_active_run(uint16_t first_angle, int16_t first_delta,
 				   int32_t *scroll_remainder,
+				   uint8_t *scroll_multiplier,
 				   int64_t *last_motion_out_ms)
 {
 	uint16_t reference_angle = first_angle;
@@ -213,6 +227,7 @@ static uint16_t encoder_active_run(uint16_t first_angle, int16_t first_delta,
 	atomic_set(&encoder_active, 1);
 	LOG_INF("Encoder active; sensor remains powered");
 	encoder_motion_process(first_angle, first_delta, scroll_remainder,
+			       scroll_multiplier,
 			       &last_diagnostic_ms, &diagnostic_burst_remaining);
 
 	while (true) {
@@ -247,6 +262,7 @@ static uint16_t encoder_active_run(uint16_t first_angle, int16_t first_delta,
 		reference_angle = sampled_angle;
 		last_motion_ms = k_uptime_get();
 		encoder_motion_process(sampled_angle, delta, scroll_remainder,
+				       scroll_multiplier,
 				       &last_diagnostic_ms,
 				       &diagnostic_burst_remaining);
 	}
@@ -375,6 +391,7 @@ void encoder_run(void)
 {
 	uint16_t idle_reference = 0U;
 	int32_t scroll_remainder = 0;
+	uint8_t scroll_multiplier = scroll_resolution_multiplier_get();
 	bool reference_valid = false;
 	int64_t last_motion_ms = -1;
 	int64_t next_probe_ms = k_uptime_get();
@@ -393,6 +410,7 @@ void encoder_run(void)
 			/* Ignore all motion while there is no host to receive it. */
 			reference_valid = false;
 			scroll_remainder = 0;
+			scroll_multiplier = scroll_resolution_multiplier_get();
 			last_motion_ms = -1;
 			next_probe_ms = now_ms + ENCODER_IDLE_SLOW_POLL_PERIOD_MS;
 			continue;
@@ -432,7 +450,8 @@ void encoder_run(void)
 		}
 
 		idle_reference = encoder_active_run(angle, delta, &scroll_remainder,
-						    &last_motion_ms);
+					    &scroll_multiplier,
+					    &last_motion_ms);
 		(void)encoder_power_set(false);
 		next_probe_ms = k_uptime_get() + ENCODER_IDLE_FAST_POLL_PERIOD_MS;
 	}

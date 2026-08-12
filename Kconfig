@@ -8,8 +8,8 @@ config BLESCROLL_RUNTIME_DIAGNOSTICS
 	depends on SERIAL && USB_DEVICE_STACK_NEXT && USBD_CDC_ACM_CLASS && LOG
 	help
 	  Keep USB CDC and logging available in the product image, while enabling
-	  the USB peripheral only when VBUS is present. A single D byte enables
-	  diagnostic output and a single d byte disables it.
+	  the USB peripheral only when VBUS is present. Single-byte commands control
+	  diagnostic output and the persistent Wheel resolution mode.
 
 config BLESCROLL_DIAGNOSTIC_MODE
 	bool "Enable USB diagnostic mode"
