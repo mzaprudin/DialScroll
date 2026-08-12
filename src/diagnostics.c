@@ -9,6 +9,7 @@
 #include "battery.h"
 #include "ble_hid.h"
 #include "encoder.h"
+#include "scroll_acceleration.h"
 #include "scroll_resolution.h"
 
 #if defined(CONFIG_BLESCROLL_RUNTIME_DIAGNOSTICS)
@@ -99,9 +100,14 @@ static void diagnostic_help_print(void)
 	printk("0  Wheel resolution off (legacy x1)\r\n");
 	printk("1  Wheel resolution x8\r\n");
 	printk("2  Wheel resolution x16 (default)\r\n");
+	printk("A  enable x1..x2 scroll acceleration and save\r\n");
+	printk("a  disable scroll acceleration and save (default)\r\n");
 	printk("Current resolution: %u (%s)\r\n",
 	       (unsigned int)scroll_resolution_get(),
 	       scroll_resolution_name_get());
+	printk("Current acceleration: %s; activation=45 deg, window=80 ms, "
+	       "x1.00<=0.40 rps, linear, x2.00>=2.00 rps\r\n",
+	       scroll_acceleration_name_get());
 }
 
 static void diagnostic_resolution_set(uint8_t command)
@@ -118,6 +124,19 @@ static void diagnostic_resolution_set(uint8_t command)
 	printk("\r\nScroll resolution saved: %u (%s)\r\n",
 	       (unsigned int)scroll_resolution_get(),
 	       scroll_resolution_name_get());
+}
+
+static void diagnostic_acceleration_set(bool enabled)
+{
+	const int err = scroll_acceleration_set(enabled);
+
+	if (err < 0) {
+		printk("\r\nScroll acceleration change failed (NVS): %d\r\n", err);
+		return;
+	}
+
+	printk("\r\nScroll acceleration saved: %s\r\n",
+	       scroll_acceleration_name_get());
 }
 
 static void diagnostic_disable(bool acknowledge)
@@ -154,6 +173,10 @@ static void diagnostic_command_work_handler(struct k_work *work)
 			diagnostic_disable(true);
 		} else if (command == 'h') {
 			diagnostic_help_print();
+		} else if (command == 'A') {
+			diagnostic_acceleration_set(true);
+		} else if (command == 'a') {
+			diagnostic_acceleration_set(false);
 		} else if ((command >= '0') && (command <= '2')) {
 			diagnostic_resolution_set(command);
 		}
@@ -176,6 +199,7 @@ static void diagnostic_uart_callback(const struct device *dev, void *user_data)
 		for (int index = 0; index < length; ++index) {
 			if ((received[index] == 'D') || (received[index] == 'd') ||
 			    (received[index] == 'h') ||
+			    (received[index] == 'A') || (received[index] == 'a') ||
 			    ((received[index] >= '0') && (received[index] <= '2'))) {
 				if (k_msgq_put(&diagnostic_command_queue,
 					       &received[index], K_NO_WAIT) == 0) {

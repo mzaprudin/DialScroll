@@ -1,0 +1,7 @@
+tests:
+  blescroll.scroll_settings:
+    tags:
+      - settings
+      - unit
+    integration_platforms:
+      - qemu_cortex_m3

@@ -1,5 +1,7 @@
 #include "scroll_resolution.h"
 
+#include "scroll_acceleration.h"
+
 #include <errno.h>
 #include <string.h>
 
@@ -12,8 +14,13 @@ LOG_MODULE_REGISTER(scroll_resolution, LOG_LEVEL_INF);
 #define SCROLL_SETTINGS_SUBTREE "blescroll"
 #define SCROLL_SETTINGS_NAME "scroll_resolution"
 #define SCROLL_SETTINGS_KEY SCROLL_SETTINGS_SUBTREE "/" SCROLL_SETTINGS_NAME
+#define ACCELERATION_SETTINGS_NAME "acceleration"
+#define ACCELERATION_SETTINGS_KEY \
+	SCROLL_SETTINGS_SUBTREE "/" ACCELERATION_SETTINGS_NAME
 
 static atomic_t current_mode = ATOMIC_INIT(SCROLL_RESOLUTION_DEFAULT_MODE);
+static atomic_t acceleration_enabled =
+	ATOMIC_INIT(SCROLL_ACCELERATION_DEFAULT_ENABLED ? 1 : 0);
 static atomic_t settings_ready;
 
 static bool scroll_resolution_mode_valid(uint8_t mode)
@@ -26,9 +33,15 @@ static int scroll_settings_set(const char *name, size_t len,
 {
 	const char *next;
 	uint8_t stored_mode;
+	bool is_resolution;
+	bool is_acceleration;
 	ssize_t read;
 
-	if (!settings_name_steq(name, SCROLL_SETTINGS_NAME, &next) || next != NULL) {
+	is_resolution = settings_name_steq(name, SCROLL_SETTINGS_NAME, &next) &&
+		next == NULL;
+	is_acceleration = settings_name_steq(
+		name, ACCELERATION_SETTINGS_NAME, &next) && next == NULL;
+	if (!is_resolution && !is_acceleration) {
 		return -ENOENT;
 	}
 	if (len != sizeof(stored_mode)) {
@@ -42,14 +55,28 @@ static int scroll_settings_set(const char *name, size_t len,
 	if (read != sizeof(stored_mode)) {
 		return -EINVAL;
 	}
-	if (!scroll_resolution_mode_valid(stored_mode)) {
-		LOG_WRN("Ignoring invalid stored scroll resolution mode %u",
-			stored_mode);
+	if (is_resolution) {
+		if (!scroll_resolution_mode_valid(stored_mode)) {
+			LOG_WRN("Ignoring invalid stored scroll resolution mode %u",
+				stored_mode);
+			return 0;
+		}
+
+		atomic_set(&current_mode, stored_mode);
+		return 0;
+	}
+	if (is_acceleration) {
+		if (stored_mode > 1U) {
+			LOG_WRN("Ignoring invalid stored acceleration state %u",
+				stored_mode);
+			return 0;
+		}
+
+		atomic_set(&acceleration_enabled, stored_mode);
 		return 0;
 	}
 
-	atomic_set(&current_mode, stored_mode);
-	return 0;
+	return -ENOENT;
 }
 
 SETTINGS_STATIC_HANDLER_DEFINE(scroll_resolution, SCROLL_SETTINGS_SUBTREE,
@@ -60,6 +87,8 @@ int scroll_resolution_init(void)
 	int err;
 
 	atomic_set(&current_mode, SCROLL_RESOLUTION_DEFAULT_MODE);
+	atomic_set(&acceleration_enabled,
+		   SCROLL_ACCELERATION_DEFAULT_ENABLED ? 1 : 0);
 
 	if (!IS_ENABLED(CONFIG_SETTINGS)) {
 		atomic_set(&settings_ready, 1);
@@ -76,7 +105,8 @@ int scroll_resolution_init(void)
 	}
 
 	atomic_set(&settings_ready, 1);
-	LOG_INF("Scroll resolution loaded: %s", scroll_resolution_name_get());
+	LOG_INF("Scroll settings loaded: resolution=%s acceleration=%s",
+		scroll_resolution_name_get(), scroll_acceleration_name_get());
 	return 0;
 }
 
@@ -133,4 +163,36 @@ const char *scroll_resolution_name_get(void)
 	default:
 		return "x16";
 	}
+}
+
+int scroll_acceleration_set(bool enabled)
+{
+	const uint8_t stored_enabled = enabled ? 1U : 0U;
+	int err;
+
+	if (!atomic_get(&settings_ready)) {
+		return -EAGAIN;
+	}
+	if (IS_ENABLED(CONFIG_SETTINGS)) {
+		err = settings_save_one(ACCELERATION_SETTINGS_KEY, &stored_enabled,
+					sizeof(stored_enabled));
+		if (err < 0) {
+			return err;
+		}
+	}
+
+	atomic_set(&acceleration_enabled, stored_enabled);
+	LOG_INF("Scroll acceleration changed to %s",
+		scroll_acceleration_name_get());
+	return 0;
+}
+
+bool scroll_acceleration_get(void)
+{
+	return atomic_get(&acceleration_enabled) != 0;
+}
+
+const char *scroll_acceleration_name_get(void)
+{
+	return scroll_acceleration_get() ? "enabled" : "disabled";
 }

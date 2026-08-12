@@ -18,6 +18,7 @@
 #include "ble_hid.h"
 #include "diagnostics.h"
 #include "encoder_math.h"
+#include "scroll_acceleration.h"
 #include "scroll_resolution.h"
 
 LOG_MODULE_REGISTER(encoder, LOG_LEVEL_INF);
@@ -40,6 +41,11 @@ static atomic_t encoder_active;
 static atomic_t encoder_angle_valid;
 static atomic_t encoder_last_angle;
 static atomic_t encoder_last_delta;
+static atomic_t encoder_acceleration_speed_counts_s;
+static atomic_t encoder_runtime_acceleration_factor_q8 =
+	ATOMIC_INIT(ENCODER_ACCELERATION_Q8_ONE);
+static atomic_t encoder_acceleration_direction;
+static atomic_t encoder_acceleration_activation_counts;
 
 #if defined(CONFIG_BLESCROLL_ENCODER_STARTUP_DIAGNOSTIC)
 struct encoder_startup_sample {
@@ -142,49 +148,97 @@ static uint32_t encoder_idle_poll_period(int64_t now_ms, int64_t last_motion_ms)
 	return ENCODER_IDLE_SLOW_POLL_PERIOD_MS;
 }
 
-static void encoder_angle_log(uint16_t angle, int16_t delta, int32_t scroll_delta)
+static const char *encoder_direction_name(int32_t direction)
+{
+	if (direction > 0) {
+		return "+";
+	}
+	if (direction < 0) {
+		return "-";
+	}
+
+	return "none";
+}
+
+static void encoder_acceleration_publish(
+	const struct encoder_acceleration_state *acceleration)
+{
+	atomic_set(&encoder_acceleration_speed_counts_s,
+		   acceleration->speed_counts_per_s);
+	atomic_set(&encoder_runtime_acceleration_factor_q8,
+		   acceleration->factor_q8);
+	atomic_set(&encoder_acceleration_direction, acceleration->direction);
+	atomic_set(&encoder_acceleration_activation_counts,
+		   acceleration->activation_counts);
+}
+
+static void encoder_acceleration_runtime_reset(
+	struct encoder_acceleration_state *acceleration)
+{
+	encoder_acceleration_reset(acceleration, scroll_acceleration_get());
+	encoder_acceleration_publish(acceleration);
+}
+
+static void encoder_angle_log(
+	uint16_t angle, int16_t delta, int32_t accelerated_delta,
+	int32_t scroll_delta,
+	const struct encoder_acceleration_state *acceleration)
 {
 	const uint32_t centidegrees =
 		((uint32_t)angle * ENCODER_FULL_TURN_CENTIDEGREES) /
 		ENCODER_ADC_MODULUS;
+	const uint32_t speed_hundredths_rps =
+		(acceleration->speed_counts_per_s * 100U +
+		 (ENCODER_ADC_MODULUS / 2U)) / ENCODER_ADC_MODULUS;
+	const uint32_t factor_hundredths =
+		((uint32_t)acceleration->factor_q8 * 100U +
+		 (ENCODER_ACCELERATION_Q8_ONE / 2U)) /
+		ENCODER_ACCELERATION_Q8_ONE;
+	const uint32_t activation_centidegrees =
+		(acceleration->activation_counts * ENCODER_FULL_TURN_CENTIDEGREES) /
+		ENCODER_ADC_MODULUS;
 
-	LOG_INF("angle=%u.%02u raw=%u delta=%d wheel=%d ble=%s",
+	LOG_INF("angle=%u.%02u raw=%u delta=%d accelerated=%d wheel=%d ble=%s "
+		"acceleration=%s speed=%u.%02u_rps factor=x%u.%02u "
+		"dir=%s activation=%u.%02u_deg",
 		centidegrees / 100U, centidegrees % 100U, angle, delta,
-		scroll_delta, ble_hid_is_connected() ? "connected" : "offline");
-}
-
-static void encoder_diagnostic_burst_log(uint16_t angle, int16_t delta,
-					 int32_t scroll_delta,
-					 int64_t *last_diagnostic_ms,
-					 uint32_t *burst_remaining)
-{
-	if (!encoder_diagnostics_enabled() ||
-	    (*burst_remaining == 0U)) {
-		return;
-	}
-
-	encoder_angle_log(angle, delta, scroll_delta);
-	*last_diagnostic_ms = k_uptime_get();
-	--*burst_remaining;
+		accelerated_delta, scroll_delta,
+		ble_hid_is_connected() ? "connected" : "offline",
+		scroll_acceleration_name_get(), speed_hundredths_rps / 100U,
+		speed_hundredths_rps % 100U, factor_hundredths / 100U,
+		factor_hundredths % 100U,
+		encoder_direction_name(acceleration->direction),
+		activation_centidegrees / 100U, activation_centidegrees % 100U);
 }
 
 static void encoder_motion_process(uint16_t angle, int16_t delta,
+				   bool significant, bool include_in_estimate,
+				   struct encoder_acceleration_state *acceleration,
 				   int32_t *scroll_remainder,
 				   uint8_t *scroll_multiplier,
 				   int64_t *last_diagnostic_ms,
 				   uint32_t *diagnostic_burst_remaining)
 {
+	const bool connected = ble_hid_is_connected();
+	int32_t accelerated_delta;
 	int32_t scroll_delta;
 	const int64_t now_ms = k_uptime_get();
 	atomic_set(&encoder_last_delta, delta);
 
-	if (!ble_hid_is_connected()) {
+	if (!connected) {
+		encoder_acceleration_runtime_reset(acceleration);
+		accelerated_delta = significant ? delta : 0;
 		/* Never replay motion that happened before the host connected. */
 		*scroll_remainder = 0;
 		scroll_delta = 0;
 	} else {
 		const uint8_t current_multiplier =
 			scroll_resolution_multiplier_get();
+
+		accelerated_delta = encoder_acceleration_apply(
+			acceleration, significant ? delta : 0,
+			scroll_acceleration_get(), include_in_estimate);
+		encoder_acceleration_publish(acceleration);
 
 		if (*scroll_multiplier != current_multiplier) {
 			/* Do not reinterpret a partial step accumulated using the old
@@ -194,7 +248,7 @@ static void encoder_motion_process(uint16_t angle, int16_t delta,
 			*scroll_multiplier = current_multiplier;
 		}
 		scroll_delta = encoder_scroll_accumulate(
-			delta, current_multiplier, scroll_remainder);
+			accelerated_delta, current_multiplier, scroll_remainder);
 	}
 
 	if (scroll_delta != 0) {
@@ -204,7 +258,8 @@ static void encoder_motion_process(uint16_t angle, int16_t delta,
 	if (encoder_diagnostics_enabled() &&
 	    ((*diagnostic_burst_remaining > 0U) ||
 	     ((now_ms - *last_diagnostic_ms) >= ENCODER_DIAGNOSTIC_PERIOD_MS))) {
-		encoder_angle_log(angle, delta, scroll_delta);
+		encoder_angle_log(angle, delta, accelerated_delta, scroll_delta,
+				  acceleration);
 		*last_diagnostic_ms = now_ms;
 		if (*diagnostic_burst_remaining > 0U) {
 			--*diagnostic_burst_remaining;
@@ -213,6 +268,7 @@ static void encoder_motion_process(uint16_t angle, int16_t delta,
 }
 
 static uint16_t encoder_active_run(uint16_t first_angle, int16_t first_delta,
+				   struct encoder_acceleration_state *acceleration,
 				   int32_t *scroll_remainder,
 				   uint8_t *scroll_multiplier,
 				   int64_t *last_motion_out_ms)
@@ -226,7 +282,8 @@ static uint16_t encoder_active_run(uint16_t first_angle, int16_t first_delta,
 
 	atomic_set(&encoder_active, 1);
 	LOG_INF("Encoder active; sensor remains powered");
-	encoder_motion_process(first_angle, first_delta, scroll_remainder,
+	encoder_motion_process(first_angle, first_delta, true, false, acceleration,
+			       scroll_remainder,
 			       scroll_multiplier,
 			       &last_diagnostic_ms, &diagnostic_burst_remaining);
 
@@ -253,15 +310,17 @@ static uint16_t encoder_active_run(uint16_t first_angle, int16_t first_delta,
 
 		delta = encoder_angle_delta(sampled_angle, reference_angle);
 		if (abs(delta) <= ENCODER_ACTIVE_NOISE_COUNTS) {
-			encoder_diagnostic_burst_log(sampled_angle, delta, 0,
-						     &last_diagnostic_ms,
-						     &diagnostic_burst_remaining);
+			encoder_motion_process(sampled_angle, delta, false, true,
+				       acceleration, scroll_remainder,
+				       scroll_multiplier, &last_diagnostic_ms,
+				       &diagnostic_burst_remaining);
 			continue;
 		}
 
 		reference_angle = sampled_angle;
 		last_motion_ms = k_uptime_get();
-		encoder_motion_process(sampled_angle, delta, scroll_remainder,
+		encoder_motion_process(sampled_angle, delta, true, true,
+				       acceleration, scroll_remainder,
 				       scroll_multiplier,
 				       &last_diagnostic_ms,
 				       &diagnostic_burst_remaining);
@@ -269,15 +328,33 @@ static uint16_t encoder_active_run(uint16_t first_angle, int16_t first_delta,
 
 	LOG_INF("Encoder idle after %u ms without movement", ENCODER_ACTIVE_TIMEOUT_MS);
 	atomic_set(&encoder_active, 0);
+	encoder_acceleration_runtime_reset(acceleration);
 	*last_motion_out_ms = last_motion_ms;
 	return sampled_angle;
 }
 
 void encoder_diagnostic_print(void)
 {
+	const bool acceleration_enabled = scroll_acceleration_get();
 	const uint32_t angle = (uint32_t)atomic_get(&encoder_last_angle);
 	const uint32_t centidegrees =
 		(angle * ENCODER_FULL_TURN_CENTIDEGREES) / ENCODER_ADC_MODULUS;
+	const uint32_t speed_counts_s = acceleration_enabled ?
+		(uint32_t)atomic_get(&encoder_acceleration_speed_counts_s) : 0U;
+	const uint32_t speed_hundredths_rps =
+		(speed_counts_s * 100U + (ENCODER_ADC_MODULUS / 2U)) /
+		ENCODER_ADC_MODULUS;
+	const uint32_t factor_q8 = acceleration_enabled ?
+		(uint32_t)atomic_get(&encoder_runtime_acceleration_factor_q8) :
+		ENCODER_ACCELERATION_Q8_ONE;
+	const uint32_t factor_hundredths =
+		(factor_q8 * 100U + (ENCODER_ACCELERATION_Q8_ONE / 2U)) /
+		ENCODER_ACCELERATION_Q8_ONE;
+	const uint32_t activation_counts = acceleration_enabled ?
+		(uint32_t)atomic_get(&encoder_acceleration_activation_counts) : 0U;
+	const uint32_t activation_centidegrees =
+		(activation_counts * ENCODER_FULL_TURN_CENTIDEGREES) /
+		ENCODER_ADC_MODULUS;
 
 	printk("encoder: state=%s power=%s angle=%s",
 	       atomic_get(&encoder_active) ? "active" : "idle",
@@ -289,6 +366,17 @@ void encoder_diagnostic_print(void)
 		       (int)atomic_get(&encoder_last_delta));
 	}
 	printk("\r\n");
+	printk("acceleration: %s speed=%u.%02u rps factor=x%u.%02u "
+	       "direction=%s activation=%u.%02u deg\r\n",
+	       scroll_acceleration_name_get(), speed_hundredths_rps / 100U,
+	       speed_hundredths_rps % 100U, factor_hundredths / 100U,
+	       factor_hundredths % 100U,
+	       encoder_direction_name(acceleration_enabled ?
+		atomic_get(&encoder_acceleration_direction) : 0),
+	       activation_centidegrees / 100U, activation_centidegrees % 100U);
+	printk("acceleration profile: activation=45.00 deg window=%u ms "
+	       "x1.00<=0.40 rps linear x2.00>=2.00 rps\r\n",
+	       ENCODER_ACCELERATION_WINDOW_MS);
 	printk("encoder config: idle=%u/%u ms settle=%u ms active=%u ms "
 	       "timeout=%u ms noise=%d counts\r\n",
 	       ENCODER_IDLE_FAST_POLL_PERIOD_MS,
@@ -390,11 +478,14 @@ void encoder_startup_diagnostic_run(void)
 void encoder_run(void)
 {
 	uint16_t idle_reference = 0U;
+	struct encoder_acceleration_state acceleration;
 	int32_t scroll_remainder = 0;
 	uint8_t scroll_multiplier = scroll_resolution_multiplier_get();
 	bool reference_valid = false;
 	int64_t last_motion_ms = -1;
 	int64_t next_probe_ms = k_uptime_get();
+
+	encoder_acceleration_runtime_reset(&acceleration);
 
 	while (true) {
 		uint16_t angle;
@@ -411,6 +502,7 @@ void encoder_run(void)
 			reference_valid = false;
 			scroll_remainder = 0;
 			scroll_multiplier = scroll_resolution_multiplier_get();
+			encoder_acceleration_runtime_reset(&acceleration);
 			last_motion_ms = -1;
 			next_probe_ms = now_ms + ENCODER_IDLE_SLOW_POLL_PERIOD_MS;
 			continue;
@@ -449,7 +541,8 @@ void encoder_run(void)
 			continue;
 		}
 
-		idle_reference = encoder_active_run(angle, delta, &scroll_remainder,
+		idle_reference = encoder_active_run(angle, delta, &acceleration,
+					    &scroll_remainder,
 					    &scroll_multiplier,
 					    &last_motion_ms);
 		(void)encoder_power_set(false);

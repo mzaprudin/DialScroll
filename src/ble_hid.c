@@ -20,6 +20,7 @@
 
 #include "app_config.h"
 #include "scroll_resolution.h"
+#include "scroll_acceleration.h"
 
 LOG_MODULE_REGISTER(ble_hid, LOG_LEVEL_INF);
 
@@ -618,6 +619,8 @@ void ble_hid_diagnostic_print(void)
 	printk("scroll resolution: mode=%u (%s), persistent=yes\r\n",
 	       (unsigned int)scroll_resolution_get(),
 	       scroll_resolution_name_get());
+	printk("scroll acceleration: %s, persistent=yes\r\n",
+	       scroll_acceleration_name_get());
 	if (interval != 0U) {
 		const uint32_t interval_hundredths_ms = (uint32_t)interval * 125U;
 

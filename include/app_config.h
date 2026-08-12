@@ -35,6 +35,18 @@
 #define ENCODER_COUNTS_PER_SCROLL_DETENT     64
 #define ENCODER_SCROLL_DIRECTION             1
 
+/* Optional scroll acceleration. All multipliers use unsigned Q8. */
+#define ENCODER_ACCELERATION_Q8_ONE                 256U
+#define ENCODER_ACCELERATION_Q8_MAX                 512U
+#define ENCODER_ACCELERATION_ACTIVATION_COUNTS      512U
+#define ENCODER_ACCELERATION_IDLE_RESET_MS          100U
+#define ENCODER_ACCELERATION_BUCKET_MS              10U
+#define ENCODER_ACCELERATION_BUCKET_COUNT           8U
+#define ENCODER_ACCELERATION_WINDOW_MS              \
+	(ENCODER_ACCELERATION_BUCKET_MS * ENCODER_ACCELERATION_BUCKET_COUNT)
+#define ENCODER_ACCELERATION_SPEED_MIN_COUNTS_S     1638U
+#define ENCODER_ACCELERATION_SPEED_MAX_COUNTS_S     8192U
+
 /*
  * The HID descriptor advertises x16. Runtime modes can coarsen those x16 units
  * to x8 or legacy x1 without changing the resulting scroll distance. The host
