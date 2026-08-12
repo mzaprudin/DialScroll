@@ -1,0 +1,55 @@
+mainmenu "BLE Scroll"
+
+source "Kconfig.zephyr"
+
+config BLESCROLL_RUNTIME_DIAGNOSTICS
+	bool "Enable VBUS-gated runtime diagnostics"
+	default n
+	depends on SERIAL && USB_DEVICE_STACK_NEXT && USBD_CDC_ACM_CLASS && LOG
+	help
+	  Keep USB CDC and logging available in the product image, while enabling
+	  the USB peripheral only when VBUS is present. A single D byte enables
+	  diagnostic output and a single d byte disables it.
+
+config BLESCROLL_DIAGNOSTIC_MODE
+	bool "Enable USB diagnostic mode"
+	default n
+	help
+	  Enable the USB CDC console and diagnostic-only application behaviour.
+	  Normal battery firmware leaves this disabled and has no USB logging.
+
+config BLESCROLL_DIAGNOSTIC_BLE
+	bool "Enable Bluetooth while diagnostics are active"
+	default n
+	depends on BLESCROLL_DIAGNOSTIC_MODE
+	help
+	  Start Bluetooth and gate regular encoder sampling on an active BLE
+	  connection while diagnostic mode is enabled.  If this is disabled,
+	  regular diagnostic encoder sampling is allowed without a BLE connection.
+
+config BLESCROLL_ENCODER_DIAGNOSTICS
+	bool "Periodic encoder angle diagnostics"
+	default n
+	depends on BLESCROLL_DIAGNOSTIC_MODE && LOG
+	help
+	  Print rate-limited raw angle and Wheel data while the encoder is active.
+	  Disable this option in builds used for power measurements.
+
+config BLESCROLL_ENCODER_STARTUP_DIAGNOSTIC
+	bool "Measure MT6701 continuously for 50 ms after power-on"
+	default n
+	depends on BLESCROLL_DIAGNOSTIC_MODE && SERIAL
+	help
+	  Each byte received through USB CDC starts one power cycle. All angle
+	  measurements collected during the first 50 ms are printed after sensor
+	  power is switched off, so serial output cannot disturb the capture.
+	  Bluetooth is controlled separately by BLESCROLL_DIAGNOSTIC_BLE.
+
+config BLESCROLL_DIAGNOSTIC_START_GATE
+	bool "Wait for a USB CDC byte before starting the application"
+	default n
+	depends on BLESCROLL_DIAGNOSTIC_MODE && SERIAL
+	help
+	  Wait for one byte on the console UART before initializing Bluetooth and
+	  the encoder. This keeps the USB terminal attached while early startup
+	  diagnostics are printed. Disable this option in normal firmware.

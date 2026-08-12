@@ -1,3 +1,47 @@
+#include <zephyr/dt-bindings/adc/nrf-adc.h>
+#include <zephyr/dt-bindings/gpio/nordic-nrf-gpio.h>
+
+/ {
+	zephyr,user {
+		/* MT6701 OUT -> P0.02/AIN0; battery divider -> P0.04/AIN2. */
+		io-channels = <&adc 0>, <&adc 1>;
+
+		/*
+		 * P0.06 drives MT6701 power or, preferably, the enable input of a
+		 * 3.3 V load switch. High drive is selected for direct-power tests.
+		 */
+		encoder-power-gpios = <&gpio0 6
+			(GPIO_ACTIVE_HIGH | NRF_GPIO_DRIVE_H0H1)>;
+	};
+};
+
+&adc {
+	#address-cells = <1>;
+	#size-cells = <0>;
+	status = "okay";
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1_4";
+		zephyr,reference = "ADC_REF_VDD_1_4";
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 10)>;
+		zephyr,input-positive = <NRF_SAADC_AIN0>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <2>;
+	};
+
+	channel@1 {
+		reg = <1>;
+		zephyr,gain = "ADC_GAIN_1_6";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		/* Long acquisition time for the high-impedance 806k/2M divider. */
+		zephyr,acquisition-time = <ADC_ACQ_TIME(ADC_ACQ_TIME_MICROSECONDS, 40)>;
+		zephyr,input-positive = <NRF_SAADC_AIN2>;
+		zephyr,resolution = <12>;
+		zephyr,oversampling = <2>;
+	};
+};
+
 /* The status LED on nice!nano-compatible Pro Micro boards is active-low. */
 &led0 {
 	gpios = <&gpio0 15 GPIO_ACTIVE_LOW>;

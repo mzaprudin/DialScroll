@@ -1,0 +1,7 @@
+tests:
+  blescroll.encoder_math:
+    tags:
+      - encoder
+      - unit
+    integration_platforms:
+      - qemu_cortex_m3

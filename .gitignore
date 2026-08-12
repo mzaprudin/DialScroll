@@ -1,1 +1,6 @@
 build*/
+twister-out*/
+.tmp-*/
+*.log
+*.csv
+artifacts/

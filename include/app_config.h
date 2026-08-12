@@ -1,0 +1,76 @@
+#ifndef BLESCROLL_APP_CONFIG_H_
+#define BLESCROLL_APP_CONFIG_H_
+
+/* MT6701 and SAADC geometry. */
+#define ENCODER_ADC_RESOLUTION_BITS          12U
+#define ENCODER_ADC_MODULUS                  (1U << ENCODER_ADC_RESOLUTION_BITS)
+#define ENCODER_ADC_MAX_CODE                 (ENCODER_ADC_MODULUS - 1U)
+#define ENCODER_ADC_HALF_TURN                (ENCODER_ADC_MODULUS / 2U)
+#define ENCODER_FULL_TURN_CENTIDEGREES       36000U
+
+/*
+ * Default MT6701 analog output spans 0..VDD. Override these endpoints after
+ * bench calibration if the sensor EEPROM is configured for 10..90% clamps.
+ */
+#define ENCODER_VOUT_MIN_CODE                0U
+#define ENCODER_VOUT_MAX_CODE                ENCODER_ADC_MAX_CODE
+
+/* Power-cycled idle probing. Bench data shows valid VOUT after about 32.8 ms. */
+#define ENCODER_IDLE_FAST_POLL_PERIOD_MS     100U
+#define ENCODER_IDLE_SLOW_POLL_PERIOD_MS     200U
+#define ENCODER_IDLE_FAST_DURATION_MS        10000U
+#define ENCODER_POWER_STABILIZE_MS           33U
+
+/* Active tracking. */
+#define ENCODER_ACTIVE_POLL_PERIOD_MS        2U
+#define ENCODER_ACTIVE_TIMEOUT_MS            400U
+
+/* Eight readings, each with SAADC oversampling from Devicetree. */
+#define ENCODER_FILTER_SAMPLE_COUNT          8U
+#define ENCODER_FILTER_DISCARD_COUNT         1U
+
+/* Circular ADC counts. Tune these values after observing real hardware. */
+#define ENCODER_IDLE_MOTION_THRESHOLD_COUNTS 8
+#define ENCODER_ACTIVE_NOISE_COUNTS          4
+#define ENCODER_COUNTS_PER_SCROLL_DETENT     64
+#define ENCODER_SCROLL_DIRECTION             1
+
+/*
+ * HID Resolution Multiplier divides every legacy Wheel detent into smaller
+ * units without changing the resulting scroll distance. The host selects the
+ * multiplier through the Feature report; unsupported hosts keep using one
+ * report unit per detent.
+ */
+#define BLE_HID_WHEEL_RESOLUTION_MULTIPLIER  16U
+#define ENCODER_COUNTS_PER_SCROLL_STEP       \
+	(ENCODER_COUNTS_PER_SCROLL_DETENT / BLE_HID_WHEEL_RESOLUTION_MULTIPLIER)
+
+/* Do not flood USB CDC while sampling the encoder at 500 Hz. */
+#define ENCODER_DIAGNOSTIC_BURST_COUNT       20U
+#define ENCODER_DIAGNOSTIC_PERIOD_MS         25U
+#define ENCODER_STARTUP_CAPTURE_DURATION_US  50000U
+#define ENCODER_STARTUP_CAPTURE_MAX_SAMPLES  1024U
+
+/* HID Wheel is an 8-bit signed relative field. */
+#define BLE_HID_INPUT_REPORT_ID              1U
+#define BLE_HID_INPUT_REPORT_SIZE            4U
+#define BLE_HID_INPUT_REPORT_INDEX           0U
+#define BLE_HID_FEATURE_REPORT_ID            2U
+#define BLE_HID_FEATURE_REPORT_SIZE          1U
+#define BLE_HID_FEATURE_REPORT_INDEX         0U
+#define BLE_HID_SCROLL_RETRY_MS              5U
+#define BLE_HID_SCROLL_MAX_RETRIES           25U
+#define BLE_HID_PENDING_LIMIT                2048
+
+/* Battery monitor: BAT+ -> 806 kohm -> P0.04 -> 2 Mohm -> GND. */
+#define BATTERY_DIVIDER_TOP_OHMS             806000U
+#define BATTERY_DIVIDER_BOTTOM_OHMS          2000000U
+#define BATTERY_ADC_SAMPLE_COUNT             8U
+#define BATTERY_ADC_DISCARD_COUNT            1U
+#define BATTERY_UPDATE_PERIOD_MS             60000U
+#define BATTERY_FIRST_UPDATE_DELAY_MS        1000U
+#define BATTERY_EMPTY_MV                     3300U
+#define BATTERY_MID_MV                       3700U
+#define BATTERY_FULL_MV                      4200U
+
+#endif /* BLESCROLL_APP_CONFIG_H_ */

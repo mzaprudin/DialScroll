@@ -3,7 +3,13 @@ param(
     [ValidateSet('sd', 'nosd')]
     [string]$Variant = 'sd',
 
-    [string]$NcsRoot = 'C:\ncs\v3.2.4'
+    [string]$NcsRoot = 'C:\ncs\v3.2.4',
+
+	[switch]$Diagnostic,
+
+	[switch]$DiagnosticBle,
+
+    [switch]$EncoderStartupDiagnostic
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,21 +68,60 @@ $env:ZEPHYR_TOOLCHAIN_VARIANT = 'zephyr'
 $env:ZEPHYR_SDK_INSTALL_DIR = Join-Path $toolchain 'opt\zephyr-sdk'
 
 $board = 'promicro_nrf52840/nrf52840/uf2'
+$diagnosticBuild = $Diagnostic -or $DiagnosticBle -or $EncoderStartupDiagnostic
 
 if ($Variant -eq 'nosd') {
-    $buildDirectory = Join-Path $workspace 'build-nosd'
-    $firmware = Join-Path $buildDirectory 'blescroll\blescroll_nosd.uf2'
-    $expectedStart = [uint32]0x1000
-	$commonConfiguration = (Join-Path $workspace 'prj.conf') -replace '\\', '/'
-	$noSoftDeviceConfiguration = (Join-Path $workspace 'prj_nosd.conf') -replace '\\', '/'
-    $configuration = '-DCONF_FILE={0};{1}' -f
-        $commonConfiguration,
-        $noSoftDeviceConfiguration
+	$variantSuffix = '-nosd'
+	$uf2VariantSuffix = '_nosd'
+	$expectedStart = [uint32]0x1000
+	$configurationFiles = @(
+		((Join-Path $workspace 'prj.conf') -replace '\\', '/'),
+		((Join-Path $workspace 'prj_nosd.conf') -replace '\\', '/')
+	)
+	} else {
+	$variantSuffix = ''
+	$uf2VariantSuffix = ''
+	$expectedStart = [uint32]0x26000
+	$configurationFiles = @(
+		((Join-Path $workspace 'prj.conf') -replace '\\', '/')
+	)
+}
+
+if ($EncoderStartupDiagnostic) {
+	$buildDirectory = Join-Path $workspace ("build{0}-startup-diagnostic" -f $variantSuffix)
+	$firmwareName = "blescroll{0}_startup_diagnostic.uf2" -f $uf2VariantSuffix
+} elseif ($DiagnosticBle) {
+	$buildDirectory = Join-Path $workspace ("build{0}-diagnostic-ble" -f $variantSuffix)
+	$firmwareName = "blescroll{0}_diagnostic_ble.uf2" -f $uf2VariantSuffix
+} elseif ($diagnosticBuild) {
+	$buildDirectory = Join-Path $workspace ("build{0}-diagnostic" -f $variantSuffix)
+	$firmwareName = "blescroll{0}_diagnostic.uf2" -f $uf2VariantSuffix
 } else {
-    $buildDirectory = Join-Path $workspace 'build'
-    $firmware = Join-Path $buildDirectory 'blescroll\blescroll.uf2'
-    $expectedStart = [uint32]0x26000
-    $configuration = $null
+	$buildDirectory = Join-Path $workspace ("build{0}" -f $variantSuffix)
+	$firmwareName = "blescroll{0}.uf2" -f $uf2VariantSuffix
+}
+
+$firmware = Join-Path $buildDirectory ("blescroll\{0}" -f $firmwareName)
+
+if ($diagnosticBuild) {
+    if ($configurationFiles.Count -eq 0) {
+        $configurationFiles += ((Join-Path $workspace 'prj.conf') -replace '\\', '/')
+    }
+	$configurationFiles += ((Join-Path $workspace 'prj_diagnostic.conf') -replace '\\', '/')
+}
+
+if ($DiagnosticBle) {
+	$configurationFiles += ((Join-Path $workspace 'prj_diagnostic_ble.conf') -replace '\\', '/')
+}
+
+if ($EncoderStartupDiagnostic) {
+    $configurationFiles += ((Join-Path $workspace 'prj_encoder_startup_diagnostic.conf') -replace '\\', '/')
+}
+
+$configuration = if ($configurationFiles.Count -gt 0) {
+    '-DCONF_FILE={0}' -f ($configurationFiles -join ';')
+} else {
+    $null
 }
 
 $westArguments = @(
