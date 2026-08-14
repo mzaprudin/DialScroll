@@ -11,6 +11,7 @@
 #include "battery.h"
 #include "diagnostics.h"
 #include "encoder.h"
+#include "heartbeat.h"
 #include "scroll_resolution.h"
 
 LOG_MODULE_REGISTER(app, LOG_LEVEL_INF);
@@ -126,6 +127,11 @@ static int bluetooth_and_battery_start(void)
 int main(void)
 {
 	int err;
+
+	err = heartbeat_init();
+	if (err < 0) {
+		LOG_WRN("Heartbeat initialization failed: %d", err);
+	}
 
 	err = diagnostics_init();
 	if (err < 0) {

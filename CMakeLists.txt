@@ -14,6 +14,7 @@ target_sources(app PRIVATE
   src/battery.c
   src/battery_math.c
   src/diagnostics.c
+  src/heartbeat.c
 )
 
 # NCS 3.2.4 generates a UF2 whose blocks are relocated to the application
