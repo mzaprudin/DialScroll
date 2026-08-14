@@ -23,6 +23,7 @@
 #include <zephyr/logging/log_ctrl.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/iterable_sections.h>
+#include <zephyr/sys/reboot.h>
 #include <zephyr/usb/usbd.h>
 
 #define DIAGNOSTIC_LOG_BACKEND_NAME "log_backend_uart"
@@ -33,11 +34,14 @@ static struct usbd_context *diagnostic_usbd;
 static const struct log_backend *diagnostic_log_backend;
 static atomic_t diagnostic_enabled;
 static atomic_t usb_configured;
+static atomic_t uf2_reset_pending;
 
 static void diagnostic_command_work_handler(struct k_work *work);
+static void uf2_reset_work_handler(struct k_work *work);
 
 K_MSGQ_DEFINE(diagnostic_command_queue, sizeof(uint8_t), 16, 1);
 K_WORK_DEFINE(diagnostic_command_work, diagnostic_command_work_handler);
+K_WORK_DELAYABLE_DEFINE(uf2_reset_work, uf2_reset_work_handler);
 
 static bool vbus_is_present(void)
 {
@@ -95,6 +99,7 @@ static void diagnostic_enable(void)
 static void diagnostic_help_print(void)
 {
 	printk("\r\n=== blescroll commands ===\r\n");
+	printk("U  enter UF2 bootloader for firmware update\r\n");
 	printk("D  enable diagnostics / print snapshot\r\n");
 	printk("d  disable diagnostics\r\n");
 	printk("h  print this help\r\n");
@@ -169,6 +174,14 @@ static void diagnostic_disable(bool acknowledge)
 	}
 }
 
+static void uf2_reset_work_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+
+	NRF_POWER->GPREGRET = 0x57;
+	sys_reboot(SYS_REBOOT_COLD);
+}
+
 static void diagnostic_command_work_handler(struct k_work *work)
 {
 	uint8_t command;
@@ -176,6 +189,10 @@ static void diagnostic_command_work_handler(struct k_work *work)
 	ARG_UNUSED(work);
 
 	while (k_msgq_get(&diagnostic_command_queue, &command, K_NO_WAIT) == 0) {
+		if (atomic_get(&uf2_reset_pending)) {
+			continue;
+		}
+
 		/* A command may have been queued immediately before VBUS was
 		 * removed. Never reactivate diagnostics after USB has gone away.
 		 */
@@ -184,7 +201,12 @@ static void diagnostic_command_work_handler(struct k_work *work)
 			continue;
 		}
 
-		if (command == 'D') {
+		if (command == 'U') {
+			if (atomic_cas(&uf2_reset_pending, 0, 1)) {
+				printk("Entering UF2 bootloader...\r\n");
+				(void)k_work_schedule(&uf2_reset_work, K_MSEC(50));
+			}
+		} else if (command == 'D') {
 			diagnostic_enable();
 		} else if (command == 'd') {
 			diagnostic_disable(true);
@@ -218,7 +240,12 @@ static void diagnostic_uart_callback(const struct device *dev, void *user_data)
 
 		length = uart_fifo_read(dev, received, sizeof(received));
 		for (int index = 0; index < length; ++index) {
-			if ((received[index] == 'D') || (received[index] == 'd') ||
+			if (atomic_get(&uf2_reset_pending)) {
+				continue;
+			}
+
+			if ((received[index] == 'U') ||
+			    (received[index] == 'D') || (received[index] == 'd') ||
 			    (received[index] == 'h') ||
 			    (received[index] == 'A') || (received[index] == 'a') ||
 			    (received[index] == 'V') || (received[index] == 'v') ||
