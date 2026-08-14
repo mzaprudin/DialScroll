@@ -5,5 +5,6 @@ int encoder_init(void);
 void encoder_run(void);
 void encoder_startup_diagnostic_run(void);
 void encoder_diagnostic_print(void);
+void encoder_source_diagnostic_print(void);
 
 #endif /* BLESCROLL_ENCODER_H_ */

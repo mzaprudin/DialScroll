@@ -1,0 +1,5 @@
+description: MagnTek MT6701 magnetic angle sensor
+
+compatible: "magntek,mt6701"
+
+include: i2c-device.yaml

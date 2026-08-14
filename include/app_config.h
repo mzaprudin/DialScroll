@@ -1,11 +1,14 @@
 #ifndef BLESCROLL_APP_CONFIG_H_
 #define BLESCROLL_APP_CONFIG_H_
 
-/* MT6701 and SAADC geometry. */
+/* Common MT6701 angle geometry and the lower-resolution SAADC input. */
+#define ENCODER_ANGLE_RESOLUTION_BITS        14U
+#define ENCODER_ANGLE_MODULUS                (1U << ENCODER_ANGLE_RESOLUTION_BITS)
+#define ENCODER_ANGLE_MAX_CODE               (ENCODER_ANGLE_MODULUS - 1U)
+#define ENCODER_ANGLE_HALF_TURN              (ENCODER_ANGLE_MODULUS / 2U)
 #define ENCODER_ADC_RESOLUTION_BITS          12U
 #define ENCODER_ADC_MODULUS                  (1U << ENCODER_ADC_RESOLUTION_BITS)
 #define ENCODER_ADC_MAX_CODE                 (ENCODER_ADC_MODULUS - 1U)
-#define ENCODER_ADC_HALF_TURN                (ENCODER_ADC_MODULUS / 2U)
 #define ENCODER_FULL_TURN_CENTIDEGREES       36000U
 
 /*
@@ -29,23 +32,26 @@
 #define ENCODER_FILTER_SAMPLE_COUNT          8U
 #define ENCODER_FILTER_DISCARD_COUNT         1U
 
-/* Circular ADC counts. Tune these values after observing real hardware. */
-#define ENCODER_IDLE_MOTION_THRESHOLD_COUNTS 8
-#define ENCODER_ACTIVE_NOISE_COUNTS          4
-#define ENCODER_COUNTS_PER_SCROLL_DETENT     64
+/* Circular 14-bit angle counts. Tune after observing real hardware. */
+#define ENCODER_IDLE_MOTION_THRESHOLD_COUNTS 32
+#define ENCODER_ACTIVE_NOISE_COUNTS          16
+#define ENCODER_COUNTS_PER_SCROLL_DETENT     256
 #define ENCODER_SCROLL_DIRECTION             1
 
 /* Optional scroll acceleration. All multipliers use unsigned Q8. */
 #define ENCODER_ACCELERATION_Q8_ONE                 256U
 #define ENCODER_ACCELERATION_Q8_MAX                 512U
-#define ENCODER_ACCELERATION_ACTIVATION_COUNTS      512U
+#define ENCODER_ACCELERATION_ACTIVATION_COUNTS      2048U
 #define ENCODER_ACCELERATION_IDLE_RESET_MS          100U
 #define ENCODER_ACCELERATION_BUCKET_MS              10U
 #define ENCODER_ACCELERATION_BUCKET_COUNT           8U
 #define ENCODER_ACCELERATION_WINDOW_MS              \
 	(ENCODER_ACCELERATION_BUCKET_MS * ENCODER_ACCELERATION_BUCKET_COUNT)
-#define ENCODER_ACCELERATION_SPEED_MIN_COUNTS_S     1638U
-#define ENCODER_ACCELERATION_SPEED_MAX_COUNTS_S     8192U
+#define ENCODER_ACCELERATION_SPEED_MIN_COUNTS_S     6552U
+#define ENCODER_ACCELERATION_SPEED_MAX_COUNTS_S     32768U
+
+/* Avoid flooding diagnostics if an unpowered or absent I2C sensor NACKs. */
+#define ENCODER_I2C_ERROR_LOG_PERIOD_MS             1000U
 
 /*
  * The HID descriptor advertises x16. Runtime modes can coarsen those x16 units

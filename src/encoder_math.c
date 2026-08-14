@@ -11,6 +11,8 @@ BUILD_ASSERT(ENCODER_VOUT_MIN_CODE < ENCODER_VOUT_MAX_CODE,
 	     "VOUT calibration range must be positive");
 BUILD_ASSERT(ENCODER_VOUT_MAX_CODE <= ENCODER_ADC_MAX_CODE,
 	     "VOUT calibration range must fit the ADC");
+BUILD_ASSERT(ENCODER_ANGLE_MODULUS == (4U * ENCODER_ADC_MODULUS),
+	     "The common angle scale must be four times the ADC scale");
 BUILD_ASSERT(ENCODER_FILTER_SAMPLE_COUNT > (2U * ENCODER_FILTER_DISCARD_COUNT),
 	     "The trimmed mean must retain at least one ADC sample");
 BUILD_ASSERT((ENCODER_COUNTS_PER_SCROLL_DETENT %
@@ -44,21 +46,26 @@ uint16_t encoder_adc_normalize(uint16_t raw_sample)
 		return 0U;
 	}
 	if (raw_sample >= ENCODER_VOUT_MAX_CODE) {
-		return ENCODER_ADC_MAX_CODE;
+		return ENCODER_ANGLE_MAX_CODE;
 	}
 
 	offset = raw_sample - ENCODER_VOUT_MIN_CODE;
-	return (uint16_t)((offset * ENCODER_ADC_MAX_CODE + (span / 2U)) / span);
+	return (uint16_t)((offset * ENCODER_ANGLE_MAX_CODE + (span / 2U)) / span);
+}
+
+uint16_t encoder_mt6701_decode_angle(uint8_t msb, uint8_t lsb)
+{
+	return ((uint16_t)msb << 6) | ((uint16_t)lsb >> 2);
 }
 
 int16_t encoder_angle_delta(uint16_t current, uint16_t previous)
 {
 	int32_t delta = (int32_t)current - (int32_t)previous;
 
-	if (delta > (int32_t)ENCODER_ADC_HALF_TURN) {
-		delta -= (int32_t)ENCODER_ADC_MODULUS;
-	} else if (delta < -(int32_t)ENCODER_ADC_HALF_TURN) {
-		delta += (int32_t)ENCODER_ADC_MODULUS;
+	if (delta > (int32_t)ENCODER_ANGLE_HALF_TURN) {
+		delta -= (int32_t)ENCODER_ANGLE_MODULUS;
+	} else if (delta < -(int32_t)ENCODER_ANGLE_HALF_TURN) {
+		delta += (int32_t)ENCODER_ANGLE_MODULUS;
 	}
 
 	return (int16_t)delta;
@@ -94,9 +101,9 @@ int encoder_angle_filter(const uint16_t samples[ENCODER_FILTER_SAMPLE_COUNT],
 
 	mean = sum / (int32_t)(ARRAY_SIZE(unwrapped) -
 		(2U * ENCODER_FILTER_DISCARD_COUNT));
-	mean %= (int32_t)ENCODER_ADC_MODULUS;
+	mean %= (int32_t)ENCODER_ANGLE_MODULUS;
 	if (mean < 0) {
-		mean += (int32_t)ENCODER_ADC_MODULUS;
+		mean += (int32_t)ENCODER_ANGLE_MODULUS;
 	}
 
 	*angle = (uint16_t)mean;

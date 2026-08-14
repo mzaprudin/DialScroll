@@ -13,15 +13,23 @@ ZTEST(encoder_math, test_adc_normalization)
 {
 	zassert_equal(encoder_adc_normalize(ENCODER_VOUT_MIN_CODE), 0U);
 	zassert_equal(encoder_adc_normalize(ENCODER_VOUT_MAX_CODE),
-		      ENCODER_ADC_MAX_CODE);
-	zassert_within(encoder_adc_normalize(ENCODER_ADC_HALF_TURN),
-		       ENCODER_ADC_HALF_TURN, 1U);
+		      ENCODER_ANGLE_MAX_CODE);
+	zassert_within(encoder_adc_normalize(ENCODER_ADC_MODULUS / 2U),
+		       ENCODER_ANGLE_HALF_TURN, 2U);
+}
+
+ZTEST(encoder_math, test_mt6701_i2c_decode)
+{
+	zassert_equal(encoder_mt6701_decode_angle(0x00U, 0x00U), 0U);
+	zassert_equal(encoder_mt6701_decode_angle(0x12U, 0x34U), 0x048dU);
+	zassert_equal(encoder_mt6701_decode_angle(0xffU, 0xffU),
+		      ENCODER_ANGLE_MAX_CODE);
 }
 
 ZTEST(encoder_math, test_circular_delta)
 {
-	zassert_equal(encoder_angle_delta(2U, 4094U), 4);
-	zassert_equal(encoder_angle_delta(4094U, 2U), -4);
+	zassert_equal(encoder_angle_delta(2U, 16382U), 4);
+	zassert_equal(encoder_angle_delta(16382U, 2U), -4);
 	zassert_equal(encoder_angle_delta(1200U, 1000U), 200);
 	zassert_equal(encoder_angle_delta(1000U, 1200U), -200);
 }
@@ -42,10 +50,10 @@ ZTEST(encoder_math, test_filter_crosses_zero_without_half_turn_glitch)
 	const uint16_t samples[ENCODER_FILTER_SAMPLE_COUNT] = {
 		4094U, 4095U, 0U, 1U, 4093U, 2U, 4095U, 0U,
 	};
-	uint16_t angle = ENCODER_ADC_HALF_TURN;
+	uint16_t angle = ENCODER_ANGLE_HALF_TURN;
 
 	zassert_ok(encoder_angle_filter(samples, &angle));
-	zassert_true(angle >= 4092U || angle <= 3U,
+	zassert_true(angle >= 16368U || angle <= 12U,
 		     "filtered wrap angle was %u", angle);
 }
 
@@ -122,17 +130,17 @@ ZTEST(encoder_math, test_runtime_resolution_modes_change_granularity)
 {
 	int32_t remainder = 0;
 
-	zassert_equal(encoder_scroll_accumulate(63, 1U, &remainder), 0);
+	zassert_equal(encoder_scroll_accumulate(255, 1U, &remainder), 0);
 	zassert_equal(encoder_scroll_accumulate(1, 1U, &remainder),
 		ENCODER_SCROLL_DIRECTION * 16);
 	zassert_equal(remainder, 0);
 
-	zassert_equal(encoder_scroll_accumulate(7, 8U, &remainder), 0);
+	zassert_equal(encoder_scroll_accumulate(31, 8U, &remainder), 0);
 	zassert_equal(encoder_scroll_accumulate(1, 8U, &remainder),
 		ENCODER_SCROLL_DIRECTION * 2);
 	zassert_equal(remainder, 0);
 
-	zassert_equal(encoder_scroll_accumulate(3, 16U, &remainder), 0);
+	zassert_equal(encoder_scroll_accumulate(15, 16U, &remainder), 0);
 	zassert_equal(encoder_scroll_accumulate(1, 16U, &remainder),
 		ENCODER_SCROLL_DIRECTION);
 	zassert_equal(remainder, 0);
@@ -164,15 +172,31 @@ ZTEST(encoder_math, test_acceleration_is_identity_when_disabled)
 ZTEST(encoder_math, test_acceleration_starts_after_45_degrees)
 {
 	struct encoder_acceleration_state state;
+	const int16_t initial = ENCODER_ACCELERATION_ACTIVATION_COUNTS - 48U;
 
 	encoder_acceleration_reset(&state, true);
-	zassert_equal(encoder_acceleration_apply(&state, 500, true, true), 500);
-	zassert_equal(encoder_acceleration_apply(&state, 12, true, true), 12);
+	zassert_equal(encoder_acceleration_apply(&state, initial, true, true),
+		      initial);
+	zassert_equal(encoder_acceleration_apply(&state, 48, true, true), 48);
 	zassert_equal(state.activation_counts,
 		      ENCODER_ACCELERATION_ACTIVATION_COUNTS);
 	zassert_equal(state.factor_q8, ENCODER_ACCELERATION_Q8_ONE);
-	zassert_true(encoder_acceleration_apply(&state, 12, true, true) > 12);
+	zassert_true(encoder_acceleration_apply(&state, 48, true, true) > 48);
 	zassert_true(state.factor_q8 > ENCODER_ACCELERATION_Q8_ONE);
+}
+
+ZTEST(encoder_math, test_14_bit_constants_preserve_physical_tuning)
+{
+	zassert_equal(ENCODER_ANGLE_MODULUS, 4U * ENCODER_ADC_MODULUS);
+	zassert_equal(ENCODER_IDLE_MOTION_THRESHOLD_COUNTS, 4U * 8U);
+	zassert_equal(ENCODER_ACTIVE_NOISE_COUNTS, 4U * 4U);
+	zassert_equal(ENCODER_COUNTS_PER_SCROLL_DETENT, 4U * 64U);
+	zassert_equal(ENCODER_ACCELERATION_ACTIVATION_COUNTS, 4U * 512U);
+	zassert_equal(ENCODER_ACCELERATION_SPEED_MIN_COUNTS_S, 4U * 1638U);
+	zassert_equal(ENCODER_ACCELERATION_SPEED_MAX_COUNTS_S, 4U * 8192U);
+	zassert_equal((ENCODER_ACCELERATION_ACTIVATION_COUNTS *
+		       ENCODER_FULL_TURN_CENTIDEGREES) /
+		      ENCODER_ANGLE_MODULUS, 4500U);
 }
 
 ZTEST(encoder_math, test_acceleration_curve_linear_midpoint_and_cap)
@@ -225,9 +249,9 @@ ZTEST(encoder_math, test_acceleration_output_is_symmetric_by_direction)
 	encoder_acceleration_reset(&negative, true);
 	for (size_t sample = 0U; sample < 25U; ++sample) {
 		const int32_t positive_delta = encoder_acceleration_apply(
-			&positive, 32, true, true);
+			&positive, 128, true, true);
 		const int32_t negative_delta = encoder_acceleration_apply(
-			&negative, -32, true, true);
+			&negative, -128, true, true);
 
 		zassert_equal(positive_delta, -negative_delta);
 		zassert_equal(positive.factor_q8, negative.factor_q8);
@@ -240,13 +264,13 @@ ZTEST(encoder_math, test_acceleration_resets_on_reverse)
 
 	encoder_acceleration_reset(&state, true);
 	for (size_t sample = 0U; sample < 20U; ++sample) {
-		(void)encoder_acceleration_apply(&state, 40, true, true);
+		(void)encoder_acceleration_apply(&state, 160, true, true);
 	}
 	zassert_true(state.factor_q8 > ENCODER_ACCELERATION_Q8_ONE);
-	zassert_equal(encoder_acceleration_apply(&state, -17, true, true), -17);
+	zassert_equal(encoder_acceleration_apply(&state, -68, true, true), -68);
 	zassert_equal(state.factor_q8, ENCODER_ACCELERATION_Q8_ONE);
 	zassert_equal(state.direction, -1);
-	zassert_equal(state.activation_counts, 17U);
+	zassert_equal(state.activation_counts, 68U);
 	zassert_equal(state.fractional_remainder_q8, 0);
 }
 
@@ -258,7 +282,7 @@ ZTEST(encoder_math, test_acceleration_resets_after_pause_and_skips_first_delta)
 
 	encoder_acceleration_reset(&state, true);
 	for (size_t sample = 0U; sample < 20U; ++sample) {
-		(void)encoder_acceleration_apply(&state, 40, true, true);
+		(void)encoder_acceleration_apply(&state, 160, true, true);
 	}
 	for (size_t sample = 0U; sample < idle_samples; ++sample) {
 		zassert_equal(encoder_acceleration_apply(
@@ -269,12 +293,12 @@ ZTEST(encoder_math, test_acceleration_resets_after_pause_and_skips_first_delta)
 	zassert_equal(state.direction, 0);
 	zassert_equal(state.activation_counts, 0U);
 
-	zassert_equal(encoder_acceleration_apply(&state, 100, true, true), 100);
+	zassert_equal(encoder_acceleration_apply(&state, 400, true, true), 400);
 	zassert_equal(state.direction, 0);
 	zassert_equal(state.activation_counts, 0U);
-	zassert_equal(encoder_acceleration_apply(&state, 10, true, true), 10);
+	zassert_equal(encoder_acceleration_apply(&state, 40, true, true), 40);
 	zassert_equal(state.direction, 1);
-	zassert_equal(state.activation_counts, 10U);
+	zassert_equal(state.activation_counts, 40U);
 }
 
 ZTEST(encoder_math, test_acceleration_state_change_restarts_at_x1)
@@ -283,14 +307,14 @@ ZTEST(encoder_math, test_acceleration_state_change_restarts_at_x1)
 
 	encoder_acceleration_reset(&state, true);
 	for (size_t sample = 0U; sample < 20U; ++sample) {
-		(void)encoder_acceleration_apply(&state, 40, true, true);
+		(void)encoder_acceleration_apply(&state, 160, true, true);
 	}
 	zassert_true(state.factor_q8 > ENCODER_ACCELERATION_Q8_ONE);
-	zassert_equal(encoder_acceleration_apply(&state, 23, false, true), 23);
+	zassert_equal(encoder_acceleration_apply(&state, 92, false, true), 92);
 	zassert_equal(state.factor_q8, ENCODER_ACCELERATION_Q8_ONE);
 	zassert_equal(state.activation_counts, 0U);
-	zassert_equal(encoder_acceleration_apply(&state, 23, true, true), 23);
-	zassert_equal(state.activation_counts, 23U);
+	zassert_equal(encoder_acceleration_apply(&state, 92, true, true), 92);
+	zassert_equal(state.activation_counts, 92U);
 }
 
 ZTEST(encoder_math, test_idle_samples_produce_no_scroll_tail)

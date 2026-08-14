@@ -1,6 +1,7 @@
 #include "scroll_resolution.h"
 
 #include "scroll_acceleration.h"
+#include "encoder_mode.h"
 
 #include <errno.h>
 #include <string.h>
@@ -17,15 +18,24 @@ LOG_MODULE_REGISTER(scroll_resolution, LOG_LEVEL_INF);
 #define ACCELERATION_SETTINGS_NAME "acceleration"
 #define ACCELERATION_SETTINGS_KEY \
 	SCROLL_SETTINGS_SUBTREE "/" ACCELERATION_SETTINGS_NAME
+#define ENCODER_MODE_SETTINGS_NAME "encoder_mode"
+#define ENCODER_MODE_SETTINGS_KEY \
+	SCROLL_SETTINGS_SUBTREE "/" ENCODER_MODE_SETTINGS_NAME
 
 static atomic_t current_mode = ATOMIC_INIT(SCROLL_RESOLUTION_DEFAULT_MODE);
 static atomic_t acceleration_enabled =
 	ATOMIC_INIT(SCROLL_ACCELERATION_DEFAULT_ENABLED ? 1 : 0);
+static atomic_t encoder_mode = ATOMIC_INIT(ENCODER_MODE_DEFAULT);
 static atomic_t settings_ready;
 
 static bool scroll_resolution_mode_valid(uint8_t mode)
 {
 	return mode <= SCROLL_RESOLUTION_MODE_X16;
+}
+
+static bool encoder_mode_valid(uint8_t mode)
+{
+	return mode <= ENCODER_MODE_ADC;
 }
 
 static int scroll_settings_set(const char *name, size_t len,
@@ -35,24 +45,41 @@ static int scroll_settings_set(const char *name, size_t len,
 	uint8_t stored_mode;
 	bool is_resolution;
 	bool is_acceleration;
+	bool is_encoder_mode;
 	ssize_t read;
 
 	is_resolution = settings_name_steq(name, SCROLL_SETTINGS_NAME, &next) &&
 		next == NULL;
 	is_acceleration = settings_name_steq(
 		name, ACCELERATION_SETTINGS_NAME, &next) && next == NULL;
-	if (!is_resolution && !is_acceleration) {
+	is_encoder_mode = settings_name_steq(
+		name, ENCODER_MODE_SETTINGS_NAME, &next) && next == NULL;
+	if (!is_resolution && !is_acceleration && !is_encoder_mode) {
 		return -ENOENT;
 	}
 	if (len != sizeof(stored_mode)) {
+		if (is_encoder_mode) {
+			LOG_WRN("Ignoring stored encoder mode with invalid length %u",
+				(unsigned int)len);
+			return 0;
+		}
 		return -EINVAL;
 	}
 
 	read = read_cb(cb_arg, &stored_mode, sizeof(stored_mode));
 	if (read < 0) {
+		if (is_encoder_mode) {
+			LOG_WRN("Ignoring unreadable stored encoder mode: %d",
+				(int)read);
+			return 0;
+		}
 		return (int)read;
 	}
 	if (read != sizeof(stored_mode)) {
+		if (is_encoder_mode) {
+			LOG_WRN("Ignoring truncated stored encoder mode");
+			return 0;
+		}
 		return -EINVAL;
 	}
 	if (is_resolution) {
@@ -75,6 +102,15 @@ static int scroll_settings_set(const char *name, size_t len,
 		atomic_set(&acceleration_enabled, stored_mode);
 		return 0;
 	}
+	if (is_encoder_mode) {
+		if (!encoder_mode_valid(stored_mode)) {
+			LOG_WRN("Ignoring invalid stored encoder mode %u", stored_mode);
+			return 0;
+		}
+
+		atomic_set(&encoder_mode, stored_mode);
+		return 0;
+	}
 
 	return -ENOENT;
 }
@@ -89,6 +125,7 @@ int scroll_resolution_init(void)
 	atomic_set(&current_mode, SCROLL_RESOLUTION_DEFAULT_MODE);
 	atomic_set(&acceleration_enabled,
 		   SCROLL_ACCELERATION_DEFAULT_ENABLED ? 1 : 0);
+	atomic_set(&encoder_mode, ENCODER_MODE_DEFAULT);
 
 	if (!IS_ENABLED(CONFIG_SETTINGS)) {
 		atomic_set(&settings_ready, 1);
@@ -105,8 +142,9 @@ int scroll_resolution_init(void)
 	}
 
 	atomic_set(&settings_ready, 1);
-	LOG_INF("Scroll settings loaded: resolution=%s acceleration=%s",
-		scroll_resolution_name_get(), scroll_acceleration_name_get());
+	LOG_INF("Settings loaded: resolution=%s acceleration=%s encoder=%s",
+		scroll_resolution_name_get(), scroll_acceleration_name_get(),
+		encoder_mode_name(encoder_mode_get()));
 	return 0;
 }
 
@@ -195,4 +233,38 @@ bool scroll_acceleration_get(void)
 const char *scroll_acceleration_name_get(void)
 {
 	return scroll_acceleration_get() ? "enabled" : "disabled";
+}
+
+int encoder_mode_set(enum encoder_mode mode)
+{
+	const uint8_t stored_mode = (uint8_t)mode;
+	int err;
+
+	if (!encoder_mode_valid(stored_mode)) {
+		return -EINVAL;
+	}
+	if (!atomic_get(&settings_ready)) {
+		return -EAGAIN;
+	}
+	if (IS_ENABLED(CONFIG_SETTINGS)) {
+		err = settings_save_one(ENCODER_MODE_SETTINGS_KEY, &stored_mode,
+					sizeof(stored_mode));
+		if (err < 0) {
+			return err;
+		}
+	}
+
+	atomic_set(&encoder_mode, stored_mode);
+	LOG_INF("Encoder mode changed to %s", encoder_mode_name(mode));
+	return 0;
+}
+
+enum encoder_mode encoder_mode_get(void)
+{
+	return (enum encoder_mode)atomic_get(&encoder_mode);
+}
+
+const char *encoder_mode_name(enum encoder_mode mode)
+{
+	return mode == ENCODER_MODE_ADC ? "ADC" : "I2C";
 }

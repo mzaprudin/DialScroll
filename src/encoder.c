@@ -8,6 +8,7 @@
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/adc.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/i2c.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/atomic.h>
@@ -18,12 +19,15 @@
 #include "ble_hid.h"
 #include "diagnostics.h"
 #include "encoder_math.h"
+#include "encoder_mode.h"
 #include "scroll_acceleration.h"
 #include "scroll_resolution.h"
 
 LOG_MODULE_REGISTER(encoder, LOG_LEVEL_INF);
 
 #define USER_NODE DT_PATH(zephyr_user)
+#define MT6701_NODE DT_NODELABEL(mt6701)
+#define MT6701_ANGLE_REGISTER 0x03U
 
 #if !DT_NODE_EXISTS(USER_NODE) || !DT_NODE_HAS_PROP(USER_NODE, io_channels)
 #error "app.overlay must define zephyr,user io-channels"
@@ -33,11 +37,17 @@ LOG_MODULE_REGISTER(encoder, LOG_LEVEL_INF);
 #error "app.overlay must define zephyr,user encoder-power-gpios"
 #endif
 
+#if !DT_NODE_EXISTS(MT6701_NODE)
+#error "app.overlay must define the mt6701 I2C node"
+#endif
+
 static const struct adc_dt_spec encoder_adc = ADC_DT_SPEC_GET_BY_IDX(USER_NODE, 0);
 static const struct gpio_dt_spec encoder_power =
 	GPIO_DT_SPEC_GET(USER_NODE, encoder_power_gpios);
+static const struct i2c_dt_spec encoder_i2c = I2C_DT_SPEC_GET(MT6701_NODE);
 static atomic_t encoder_power_enabled;
 static atomic_t encoder_active;
+static atomic_t encoder_runtime_mode = ATOMIC_INIT(ENCODER_MODE_DEFAULT);
 static atomic_t encoder_angle_valid;
 static atomic_t encoder_last_angle;
 static atomic_t encoder_last_delta;
@@ -46,14 +56,18 @@ static atomic_t encoder_runtime_acceleration_factor_q8 =
 	ATOMIC_INIT(ENCODER_ACCELERATION_Q8_ONE);
 static atomic_t encoder_acceleration_direction;
 static atomic_t encoder_acceleration_activation_counts;
+static atomic_t encoder_last_read_error;
+static atomic_t encoder_last_read_error_mode = ATOMIC_INIT(ENCODER_MODE_DEFAULT);
+static int64_t encoder_last_i2c_error_log_ms = -1;
 
 #if defined(CONFIG_BLESCROLL_ENCODER_STARTUP_DIAGNOSTIC)
 struct encoder_startup_sample {
 	uint32_t start_us;
 	uint32_t end_us;
-	uint16_t raw_adc;
+	uint16_t raw_value;
 	uint16_t angle;
 	int16_t error;
+	uint8_t source;
 };
 
 static struct encoder_startup_sample
@@ -96,25 +110,68 @@ static int encoder_adc_read(uint16_t *raw_adc)
 	return 0;
 }
 
-static int encoder_angle_read(uint16_t *angle)
+static int encoder_i2c_read(uint16_t *angle)
 {
-	uint16_t samples[ENCODER_FILTER_SAMPLE_COUNT];
+	const uint8_t address = MT6701_ANGLE_REGISTER;
+	uint8_t registers[2];
 	int err;
 
-	for (size_t index = 0U; index < ARRAY_SIZE(samples); ++index) {
-		err = encoder_adc_read(&samples[index]);
-		if (err < 0) {
-			LOG_ERR("SAADC read failed: %d", err);
-			return err;
+	err = i2c_write_read_dt(&encoder_i2c, &address, sizeof(address),
+				registers, sizeof(registers));
+	if (err < 0) {
+		return err;
+	}
+
+	*angle = encoder_mt6701_decode_angle(registers[0], registers[1]);
+	return 0;
+}
+
+static void encoder_read_error_record(enum encoder_mode mode, int err)
+{
+	atomic_set(&encoder_last_read_error, err);
+	atomic_set(&encoder_last_read_error_mode, mode);
+
+	if (mode == ENCODER_MODE_I2C) {
+		const int64_t now_ms = k_uptime_get();
+
+		if ((encoder_last_i2c_error_log_ms < 0) ||
+		    ((now_ms - encoder_last_i2c_error_log_ms) >=
+		     ENCODER_I2C_ERROR_LOG_PERIOD_MS)) {
+			LOG_ERR("MT6701 I2C angle read failed: %d", err);
+			encoder_last_i2c_error_log_ms = now_ms;
+		}
+	} else {
+		LOG_ERR("SAADC angle read failed: %d", err);
+	}
+}
+
+static int encoder_angle_read(enum encoder_mode mode, uint16_t *angle)
+{
+	uint16_t samples[ENCODER_FILTER_SAMPLE_COUNT];
+	int err = 0;
+
+	if (mode == ENCODER_MODE_I2C) {
+		err = encoder_i2c_read(angle);
+	} else {
+		for (size_t index = 0U; index < ARRAY_SIZE(samples); ++index) {
+			err = encoder_adc_read(&samples[index]);
+			if (err < 0) {
+				break;
+			}
+		}
+		if (err == 0) {
+			err = encoder_angle_filter(samples, angle);
 		}
 	}
 
-	err = encoder_angle_filter(samples, angle);
-	if (err == 0) {
-		atomic_set(&encoder_last_angle, *angle);
-		atomic_set(&encoder_angle_valid, 1);
+	if (err < 0) {
+		encoder_read_error_record(mode, err);
+		return err;
 	}
-	return err;
+
+	atomic_set(&encoder_last_angle, *angle);
+	atomic_set(&encoder_angle_valid, 1);
+	return 0;
 }
 
 static void encoder_sleep_until(int64_t deadline_ms)
@@ -179,6 +236,20 @@ static void encoder_acceleration_runtime_reset(
 	encoder_acceleration_publish(acceleration);
 }
 
+static void encoder_tracking_reset(
+	struct encoder_acceleration_state *acceleration, bool *reference_valid,
+	int32_t *scroll_remainder, uint8_t *scroll_multiplier,
+	int64_t *last_motion_ms)
+{
+	atomic_set(&encoder_angle_valid, 0);
+	atomic_set(&encoder_last_delta, 0);
+	*reference_valid = false;
+	*scroll_remainder = 0;
+	*scroll_multiplier = scroll_resolution_multiplier_get();
+	encoder_acceleration_runtime_reset(acceleration);
+	*last_motion_ms = -1;
+}
+
 static void encoder_angle_log(
 	uint16_t angle, int16_t delta, int32_t accelerated_delta,
 	int32_t scroll_delta,
@@ -186,17 +257,17 @@ static void encoder_angle_log(
 {
 	const uint32_t centidegrees =
 		((uint32_t)angle * ENCODER_FULL_TURN_CENTIDEGREES) /
-		ENCODER_ADC_MODULUS;
+		ENCODER_ANGLE_MODULUS;
 	const uint32_t speed_hundredths_rps =
 		(acceleration->speed_counts_per_s * 100U +
-		 (ENCODER_ADC_MODULUS / 2U)) / ENCODER_ADC_MODULUS;
+		 (ENCODER_ANGLE_MODULUS / 2U)) / ENCODER_ANGLE_MODULUS;
 	const uint32_t factor_hundredths =
 		((uint32_t)acceleration->factor_q8 * 100U +
 		 (ENCODER_ACCELERATION_Q8_ONE / 2U)) /
 		ENCODER_ACCELERATION_Q8_ONE;
 	const uint32_t activation_centidegrees =
 		(acceleration->activation_counts * ENCODER_FULL_TURN_CENTIDEGREES) /
-		ENCODER_ADC_MODULUS;
+		ENCODER_ANGLE_MODULUS;
 
 	LOG_INF("angle=%u.%02u raw=%u delta=%d accelerated=%d wheel=%d ble=%s "
 		"acceleration=%s speed=%u.%02u_rps factor=x%u.%02u "
@@ -267,11 +338,18 @@ static void encoder_motion_process(uint16_t angle, int16_t delta,
 	}
 }
 
-static uint16_t encoder_active_run(uint16_t first_angle, int16_t first_delta,
-				   struct encoder_acceleration_state *acceleration,
-				   int32_t *scroll_remainder,
-				   uint8_t *scroll_multiplier,
-				   int64_t *last_motion_out_ms)
+enum encoder_active_exit {
+	ENCODER_ACTIVE_EXIT_IDLE,
+	ENCODER_ACTIVE_EXIT_DISCONNECTED,
+	ENCODER_ACTIVE_EXIT_MODE_CHANGED,
+	ENCODER_ACTIVE_EXIT_READ_ERROR,
+};
+
+static enum encoder_active_exit encoder_active_run(
+	enum encoder_mode mode, uint16_t first_angle, int16_t first_delta,
+	struct encoder_acceleration_state *acceleration,
+	int32_t *scroll_remainder, uint8_t *scroll_multiplier,
+	int64_t *last_motion_out_ms, uint16_t *last_angle_out)
 {
 	uint16_t reference_angle = first_angle;
 	uint16_t sampled_angle = first_angle;
@@ -279,9 +357,15 @@ static uint16_t encoder_active_run(uint16_t first_angle, int16_t first_delta,
 	int64_t last_diagnostic_ms = last_motion_ms - ENCODER_DIAGNOSTIC_PERIOD_MS;
 	int64_t next_sample_ms = last_motion_ms;
 	uint32_t diagnostic_burst_remaining = ENCODER_DIAGNOSTIC_BURST_COUNT;
+	enum encoder_active_exit exit_reason = ENCODER_ACTIVE_EXIT_IDLE;
 
 	atomic_set(&encoder_active, 1);
-	LOG_INF("Encoder active; sensor remains powered");
+	LOG_INF("Encoder active on %s; sensor remains powered",
+		encoder_mode_name(mode));
+	if (encoder_mode_get() != mode) {
+		exit_reason = ENCODER_ACTIVE_EXIT_MODE_CHANGED;
+		goto out;
+	}
 	encoder_motion_process(first_angle, first_delta, true, false, acceleration,
 			       scroll_remainder,
 			       scroll_multiplier,
@@ -292,7 +376,12 @@ static uint16_t encoder_active_run(uint16_t first_angle, int16_t first_delta,
 		int err;
 		const int64_t now_ms = k_uptime_get();
 
+		if (encoder_mode_get() != mode) {
+			exit_reason = ENCODER_ACTIVE_EXIT_MODE_CHANGED;
+			break;
+		}
 		if (encoder_requires_ble_connection() && !ble_hid_is_connected()) {
+			exit_reason = ENCODER_ACTIVE_EXIT_DISCONNECTED;
 			break;
 		}
 
@@ -303,8 +392,18 @@ static uint16_t encoder_active_run(uint16_t first_angle, int16_t first_delta,
 		next_sample_ms += ENCODER_ACTIVE_POLL_PERIOD_MS;
 		encoder_sleep_until(next_sample_ms);
 
-		err = encoder_angle_read(&sampled_angle);
+		err = encoder_angle_read(mode, &sampled_angle);
 		if (err < 0) {
+			exit_reason = encoder_mode_get() != mode ?
+				ENCODER_ACTIVE_EXIT_MODE_CHANGED :
+				ENCODER_ACTIVE_EXIT_READ_ERROR;
+			break;
+		}
+		/* A source command may have arrived during the hardware read. Discard
+		 * that sample so the old and new angular domains are never compared.
+		 */
+		if (encoder_mode_get() != mode) {
+			exit_reason = ENCODER_ACTIVE_EXIT_MODE_CHANGED;
 			break;
 		}
 
@@ -326,11 +425,38 @@ static uint16_t encoder_active_run(uint16_t first_angle, int16_t first_delta,
 				       &diagnostic_burst_remaining);
 	}
 
-	LOG_INF("Encoder idle after %u ms without movement", ENCODER_ACTIVE_TIMEOUT_MS);
+out:
+	if (exit_reason == ENCODER_ACTIVE_EXIT_IDLE) {
+		LOG_INF("Encoder idle after %u ms without movement",
+			ENCODER_ACTIVE_TIMEOUT_MS);
+	} else if (exit_reason == ENCODER_ACTIVE_EXIT_MODE_CHANGED) {
+		LOG_INF("Encoder source switch requested; ending active cycle");
+	}
 	atomic_set(&encoder_active, 0);
 	encoder_acceleration_runtime_reset(acceleration);
 	*last_motion_out_ms = last_motion_ms;
-	return sampled_angle;
+	*last_angle_out = sampled_angle;
+	return exit_reason;
+}
+
+void encoder_source_diagnostic_print(void)
+{
+	const enum encoder_mode selected = encoder_mode_get();
+	const enum encoder_mode active_source =
+		(enum encoder_mode)atomic_get(&encoder_runtime_mode);
+	const int last_error = (int)atomic_get(&encoder_last_read_error);
+
+	printk("encoder source: selected=%s active=%s last-read-error=",
+	       encoder_mode_name(selected), encoder_mode_name(active_source));
+	if (last_error == 0) {
+		printk("none");
+	} else {
+		const enum encoder_mode error_source =
+			(enum encoder_mode)atomic_get(&encoder_last_read_error_mode);
+
+		printk("%d (%s)", last_error, encoder_mode_name(error_source));
+	}
+	printk("\r\n");
 }
 
 void encoder_diagnostic_print(void)
@@ -338,12 +464,12 @@ void encoder_diagnostic_print(void)
 	const bool acceleration_enabled = scroll_acceleration_get();
 	const uint32_t angle = (uint32_t)atomic_get(&encoder_last_angle);
 	const uint32_t centidegrees =
-		(angle * ENCODER_FULL_TURN_CENTIDEGREES) / ENCODER_ADC_MODULUS;
+		(angle * ENCODER_FULL_TURN_CENTIDEGREES) / ENCODER_ANGLE_MODULUS;
 	const uint32_t speed_counts_s = acceleration_enabled ?
 		(uint32_t)atomic_get(&encoder_acceleration_speed_counts_s) : 0U;
 	const uint32_t speed_hundredths_rps =
-		(speed_counts_s * 100U + (ENCODER_ADC_MODULUS / 2U)) /
-		ENCODER_ADC_MODULUS;
+		(speed_counts_s * 100U + (ENCODER_ANGLE_MODULUS / 2U)) /
+		ENCODER_ANGLE_MODULUS;
 	const uint32_t factor_q8 = acceleration_enabled ?
 		(uint32_t)atomic_get(&encoder_runtime_acceleration_factor_q8) :
 		ENCODER_ACCELERATION_Q8_ONE;
@@ -354,8 +480,9 @@ void encoder_diagnostic_print(void)
 		(uint32_t)atomic_get(&encoder_acceleration_activation_counts) : 0U;
 	const uint32_t activation_centidegrees =
 		(activation_counts * ENCODER_FULL_TURN_CENTIDEGREES) /
-		ENCODER_ADC_MODULUS;
+		ENCODER_ANGLE_MODULUS;
 
+	encoder_source_diagnostic_print();
 	printk("encoder: state=%s power=%s angle=%s",
 	       atomic_get(&encoder_active) ? "active" : "idle",
 	       atomic_get(&encoder_power_enabled) ? "on" : "off",
@@ -410,8 +537,16 @@ int encoder_init(void)
 		LOG_ERR("SAADC channel setup failed: %d", err);
 		return err;
 	}
+	if (!i2c_is_ready_dt(&encoder_i2c)) {
+		LOG_ERR("I2C0 is not ready");
+		return -ENODEV;
+	}
 
-	LOG_INF("MT6701: OUT=AIN0/P0.02, power=P0.06, idle=%u/%u ms, active=%u ms",
+	atomic_set(&encoder_runtime_mode, encoder_mode_get());
+	LOG_INF("MT6701: ADC=AIN0/P0.02, I2C0 SDA=P1.00 SCL=P0.11 addr=0x%02x",
+		encoder_i2c.addr);
+	LOG_INF("MT6701: power=P0.17, selected=%s, idle=%u/%u ms, active=%u ms",
+		encoder_mode_name(encoder_mode_get()),
 		ENCODER_IDLE_FAST_POLL_PERIOD_MS, ENCODER_IDLE_SLOW_POLL_PERIOD_MS,
 		ENCODER_ACTIVE_POLL_PERIOD_MS);
 	LOG_INF("MT6701 power stabilization is %u ms", ENCODER_POWER_STABILIZE_MS);
@@ -422,10 +557,12 @@ int encoder_init(void)
 void encoder_startup_diagnostic_run(void)
 {
 #if defined(CONFIG_BLESCROLL_ENCODER_STARTUP_DIAGNOSTIC)
+	const enum encoder_mode mode = encoder_mode_get();
 	uint32_t power_on_cycles;
 	uint32_t sample_count = 0U;
 	int power_err;
 
+	atomic_set(&encoder_runtime_mode, mode);
 	power_err = encoder_power_set(true);
 	if (power_err < 0) {
 		printk("Encoder power-on failed: %d\r\n", power_err);
@@ -445,8 +582,22 @@ void encoder_startup_diagnostic_run(void)
 		}
 
 		sample->start_us = (uint32_t)elapsed_us;
-		err = encoder_adc_read(&sample->raw_adc);
-		sample->angle = encoder_adc_normalize(sample->raw_adc);
+		sample->raw_value = 0U;
+		sample->angle = 0U;
+		sample->source = (uint8_t)mode;
+		if (mode == ENCODER_MODE_I2C) {
+			err = encoder_i2c_read(&sample->angle);
+			sample->raw_value = sample->angle;
+		} else {
+			err = encoder_adc_read(&sample->raw_value);
+			if (err == 0) {
+				sample->angle =
+					encoder_adc_normalize(sample->raw_value);
+			}
+		}
+		if (err < 0) {
+			encoder_read_error_record(mode, err);
+		}
 		sample->end_us = k_cyc_to_us_floor32(
 			k_cycle_get_32() - power_on_cycles);
 		sample->error = (int16_t)err;
@@ -454,19 +605,21 @@ void encoder_startup_diagnostic_run(void)
 	}
 
 	(void)encoder_power_set(false);
-	printk("\r\n--- capture: %u samples, window=%u us ---\r\n",
-	       sample_count, ENCODER_STARTUP_CAPTURE_DURATION_US);
-	printk("index,start_us,end_us,raw_adc,angle_raw,angle_cdeg,error\r\n");
+	printk("\r\n--- %s capture: %u samples, window=%u us ---\r\n",
+	       encoder_mode_name(mode), sample_count,
+	       ENCODER_STARTUP_CAPTURE_DURATION_US);
+	printk("source,index,start_us,end_us,raw,angle_raw,angle_cdeg,error\r\n");
 	for (uint32_t index = 0U; index < sample_count; ++index) {
 		const struct encoder_startup_sample *const sample =
 			&startup_samples[index];
 		const uint32_t centidegrees =
 			((uint32_t)sample->angle * ENCODER_FULL_TURN_CENTIDEGREES) /
-			ENCODER_ADC_MODULUS;
+			ENCODER_ANGLE_MODULUS;
 
-		printk("%u,%u,%u,%u,%u,%u,%d\r\n", index, sample->start_us,
-		       sample->end_us, sample->raw_adc, sample->angle,
-		       centidegrees, sample->error);
+		printk("%s,%u,%u,%u,%u,%u,%u,%d\r\n",
+		       encoder_mode_name((enum encoder_mode)sample->source), index,
+		       sample->start_us, sample->end_us, sample->raw_value,
+		       sample->angle, centidegrees, sample->error);
 		k_sleep(K_MSEC(4));
 	}
 	printk("--- end capture; encoder power is off ---\r\n");
@@ -484,7 +637,9 @@ void encoder_run(void)
 	bool reference_valid = false;
 	int64_t last_motion_ms = -1;
 	int64_t next_probe_ms = k_uptime_get();
+	enum encoder_mode runtime_mode = encoder_mode_get();
 
+	atomic_set(&encoder_runtime_mode, runtime_mode);
 	encoder_acceleration_runtime_reset(&acceleration);
 
 	while (true) {
@@ -493,17 +648,25 @@ void encoder_run(void)
 		int err;
 		int64_t now_ms;
 		uint32_t idle_poll_period_ms;
+		enum encoder_active_exit active_exit;
 
 		encoder_sleep_until(next_probe_ms);
 		now_ms = k_uptime_get();
+		if (encoder_mode_get() != runtime_mode) {
+			runtime_mode = encoder_mode_get();
+			atomic_set(&encoder_runtime_mode, runtime_mode);
+			encoder_tracking_reset(&acceleration, &reference_valid,
+				&scroll_remainder, &scroll_multiplier,
+				&last_motion_ms);
+			LOG_INF("Encoder runtime source is now %s; tracking reset",
+				encoder_mode_name(runtime_mode));
+		}
 
 		if (encoder_requires_ble_connection() && !ble_hid_is_connected()) {
 			/* Ignore all motion while there is no host to receive it. */
-			reference_valid = false;
-			scroll_remainder = 0;
-			scroll_multiplier = scroll_resolution_multiplier_get();
-			encoder_acceleration_runtime_reset(&acceleration);
-			last_motion_ms = -1;
+			encoder_tracking_reset(&acceleration, &reference_valid,
+				&scroll_remainder, &scroll_multiplier,
+				&last_motion_ms);
 			next_probe_ms = now_ms + ENCODER_IDLE_SLOW_POLL_PERIOD_MS;
 			continue;
 		}
@@ -517,9 +680,28 @@ void encoder_run(void)
 		}
 
 		k_sleep(K_MSEC(ENCODER_POWER_STABILIZE_MS));
-		err = encoder_angle_read(&angle);
+		if (encoder_mode_get() != runtime_mode) {
+			(void)encoder_power_set(false);
+			next_probe_ms = k_uptime_get();
+			continue;
+		}
+		err = encoder_angle_read(runtime_mode, &angle);
 		if (err < 0) {
 			(void)encoder_power_set(false);
+			if (encoder_mode_get() != runtime_mode) {
+				next_probe_ms = k_uptime_get();
+				continue;
+			}
+			if (runtime_mode == ENCODER_MODE_I2C) {
+				encoder_tracking_reset(&acceleration, &reference_valid,
+					&scroll_remainder, &scroll_multiplier,
+					&last_motion_ms);
+			}
+			continue;
+		}
+		if (encoder_mode_get() != runtime_mode) {
+			(void)encoder_power_set(false);
+			next_probe_ms = k_uptime_get();
 			continue;
 		}
 
@@ -541,11 +723,22 @@ void encoder_run(void)
 			continue;
 		}
 
-		idle_reference = encoder_active_run(angle, delta, &acceleration,
-					    &scroll_remainder,
-					    &scroll_multiplier,
-					    &last_motion_ms);
+		active_exit = encoder_active_run(
+			runtime_mode, angle, delta, &acceleration,
+			&scroll_remainder, &scroll_multiplier, &last_motion_ms,
+			&idle_reference);
 		(void)encoder_power_set(false);
-		next_probe_ms = k_uptime_get() + ENCODER_IDLE_FAST_POLL_PERIOD_MS;
+		if ((active_exit == ENCODER_ACTIVE_EXIT_MODE_CHANGED) ||
+		    ((active_exit == ENCODER_ACTIVE_EXIT_READ_ERROR) &&
+		     (runtime_mode == ENCODER_MODE_I2C))) {
+			encoder_tracking_reset(&acceleration, &reference_valid,
+				&scroll_remainder, &scroll_multiplier,
+				&last_motion_ms);
+		} else {
+			reference_valid = true;
+		}
+		next_probe_ms = k_uptime_get() +
+			(active_exit == ENCODER_ACTIVE_EXIT_MODE_CHANGED ? 0U :
+			 ENCODER_IDLE_FAST_POLL_PERIOD_MS);
 	}
 }

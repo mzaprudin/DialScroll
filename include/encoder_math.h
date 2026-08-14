@@ -23,6 +23,7 @@ struct encoder_acceleration_state {
 };
 
 uint16_t encoder_adc_normalize(uint16_t raw_sample);
+uint16_t encoder_mt6701_decode_angle(uint8_t msb, uint8_t lsb);
 int16_t encoder_angle_delta(uint16_t current, uint16_t previous);
 int encoder_angle_filter(const uint16_t samples[ENCODER_FILTER_SAMPLE_COUNT],
 			 uint16_t *angle);
