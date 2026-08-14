@@ -32,6 +32,9 @@
 #define ENCODER_FILTER_SAMPLE_COUNT          8U
 #define ENCODER_FILTER_DISCARD_COUNT         1U
 
+/* Runtime I2C angle smoothing. Alpha is stored as Q8 (64/256 = 1/4). */
+#define ENCODER_I2C_EMA_ALPHA_Q8             64U
+
 /* Circular 14-bit angle counts. Tune after observing real hardware. */
 #define ENCODER_IDLE_MOTION_THRESHOLD_COUNTS 32
 #define ENCODER_ACTIVE_NOISE_COUNTS          16

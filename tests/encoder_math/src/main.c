@@ -34,6 +34,34 @@ ZTEST(encoder_math, test_circular_delta)
 	zassert_equal(encoder_angle_delta(1000U, 1200U), -200);
 }
 
+ZTEST(encoder_math, test_i2c_ema_smooths_and_converges)
+{
+	struct encoder_angle_ema_state state;
+	uint16_t filtered;
+
+	encoder_angle_ema_reset(&state);
+	zassert_equal(encoder_angle_ema_update(&state, 1000U), 1000U);
+	filtered = encoder_angle_ema_update(&state, 1100U);
+	zassert_true(filtered > 1000U && filtered < 1100U);
+	for (size_t sample = 0U; sample < 32U; ++sample) {
+		filtered = encoder_angle_ema_update(&state, 1100U);
+	}
+	zassert_within(filtered, 1100U, 1U);
+}
+
+ZTEST(encoder_math, test_i2c_ema_follows_shortest_wrap_direction)
+{
+	struct encoder_angle_ema_state state;
+	uint16_t filtered;
+
+	encoder_angle_ema_reset(&state);
+	(void)encoder_angle_ema_update(&state, ENCODER_ANGLE_MAX_CODE - 3U);
+	filtered = encoder_angle_ema_update(&state, 4U);
+	zassert_true(filtered >=
+			     ENCODER_ANGLE_MAX_CODE - 3U ||
+			     filtered <= 4U);
+}
+
 ZTEST(encoder_math, test_filter_rejects_outliers)
 {
 	const uint16_t samples[ENCODER_FILTER_SAMPLE_COUNT] = {

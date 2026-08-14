@@ -59,6 +59,7 @@ static atomic_t encoder_acceleration_activation_counts;
 static atomic_t encoder_last_read_error;
 static atomic_t encoder_last_read_error_mode = ATOMIC_INIT(ENCODER_MODE_DEFAULT);
 static int64_t encoder_last_i2c_error_log_ms = -1;
+static struct encoder_angle_ema_state encoder_i2c_ema;
 
 #if defined(CONFIG_BLESCROLL_ENCODER_STARTUP_DIAGNOSTIC)
 struct encoder_startup_sample {
@@ -148,10 +149,15 @@ static void encoder_read_error_record(enum encoder_mode mode, int err)
 static int encoder_angle_read(enum encoder_mode mode, uint16_t *angle)
 {
 	uint16_t samples[ENCODER_FILTER_SAMPLE_COUNT];
+	uint16_t raw_angle;
 	int err = 0;
 
 	if (mode == ENCODER_MODE_I2C) {
-		err = encoder_i2c_read(angle);
+		err = encoder_i2c_read(&raw_angle);
+		if (err == 0) {
+			*angle = encoder_angle_ema_update(&encoder_i2c_ema,
+							 raw_angle);
+		}
 	} else {
 		for (size_t index = 0U; index < ARRAY_SIZE(samples); ++index) {
 			err = encoder_adc_read(&samples[index]);
@@ -247,6 +253,7 @@ static void encoder_tracking_reset(
 	*scroll_remainder = 0;
 	*scroll_multiplier = scroll_resolution_multiplier_get();
 	encoder_acceleration_runtime_reset(acceleration);
+	encoder_angle_ema_reset(&encoder_i2c_ema);
 	*last_motion_ms = -1;
 }
 
@@ -515,6 +522,8 @@ void encoder_diagnostic_print(void)
 int encoder_init(void)
 {
 	int err;
+
+	encoder_angle_ema_reset(&encoder_i2c_ema);
 
 	if (!gpio_is_ready_dt(&encoder_power)) {
 		LOG_ERR("Encoder power GPIO is not ready");

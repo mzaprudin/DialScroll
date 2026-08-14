@@ -15,6 +15,9 @@ BUILD_ASSERT(ENCODER_ANGLE_MODULUS == (4U * ENCODER_ADC_MODULUS),
 	     "The common angle scale must be four times the ADC scale");
 BUILD_ASSERT(ENCODER_FILTER_SAMPLE_COUNT > (2U * ENCODER_FILTER_DISCARD_COUNT),
 	     "The trimmed mean must retain at least one ADC sample");
+BUILD_ASSERT(ENCODER_I2C_EMA_ALPHA_Q8 > 0U &&
+	     ENCODER_I2C_EMA_ALPHA_Q8 <= 256U,
+	     "I2C EMA alpha must be in the range (0, 1]");
 BUILD_ASSERT((ENCODER_COUNTS_PER_SCROLL_DETENT %
 	      BLE_HID_WHEEL_RESOLUTION_MULTIPLIER) == 0,
 	     "A Wheel detent must contain a whole number of high-resolution units");
@@ -69,6 +72,65 @@ int16_t encoder_angle_delta(uint16_t current, uint16_t previous)
 	}
 
 	return (int16_t)delta;
+}
+
+void encoder_angle_ema_reset(struct encoder_angle_ema_state *state)
+{
+	if (state == NULL) {
+		return;
+	}
+
+	state->valid = false;
+	state->angle_q8 = 0;
+}
+
+uint16_t encoder_angle_ema_update(
+	struct encoder_angle_ema_state *state, uint16_t raw_angle)
+{
+	const int32_t q8_one = 256;
+	const int32_t modulus_q8 = (int32_t)ENCODER_ANGLE_MODULUS * q8_one;
+	const int32_t raw_angle_q8 = (int32_t)raw_angle * q8_one;
+	int32_t delta_q8;
+	int32_t correction_q8;
+	int32_t rounded_q8;
+
+	if (state == NULL) {
+		return raw_angle;
+	}
+
+	if (!state->valid) {
+		state->valid = true;
+		state->angle_q8 = raw_angle_q8;
+		return raw_angle;
+	}
+
+	delta_q8 = raw_angle_q8 - state->angle_q8;
+	if (delta_q8 > (modulus_q8 / 2)) {
+		delta_q8 -= modulus_q8;
+	} else if (delta_q8 < -(modulus_q8 / 2)) {
+		delta_q8 += modulus_q8;
+	}
+
+	correction_q8 = delta_q8 * (int32_t)ENCODER_I2C_EMA_ALPHA_Q8;
+	if (correction_q8 >= 0) {
+		correction_q8 += q8_one / 2;
+	} else {
+		correction_q8 -= q8_one / 2;
+	}
+	state->angle_q8 += correction_q8 / q8_one;
+
+	if (state->angle_q8 >= modulus_q8) {
+		state->angle_q8 -= modulus_q8;
+	} else if (state->angle_q8 < 0) {
+		state->angle_q8 += modulus_q8;
+	}
+
+	rounded_q8 = state->angle_q8 + (q8_one / 2);
+	if (rounded_q8 >= modulus_q8) {
+		rounded_q8 -= modulus_q8;
+	}
+
+	return (uint16_t)(rounded_q8 / q8_one);
 }
 
 int encoder_angle_filter(const uint16_t samples[ENCODER_FILTER_SAMPLE_COUNT],
