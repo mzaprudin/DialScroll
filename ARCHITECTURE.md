@@ -369,7 +369,7 @@ HID-дескриптор постоянно объявляет максимум 
 
 BLE-подсистема отвечает за:
 
-- connectable advertising с именем `BLE Scroll`;
+- connectable advertising с именем `AirScroll`;
 - pairing и bonding через Zephyr settings;
 - одно активное соединение;
 - security level L2;
