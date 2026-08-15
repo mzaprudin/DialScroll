@@ -25,12 +25,16 @@ static uint8_t last_battery_level;
 static bool battery_level_valid;
 static atomic_t diagnostic_battery_valid;
 static atomic_t diagnostic_battery_mv;
+static atomic_t diagnostic_battery_pin_mv;
+static atomic_t diagnostic_battery_raw;
 static atomic_t diagnostic_battery_level;
 static struct k_work_delayable battery_update_work;
 
-static int battery_voltage_read(int32_t *millivolts)
+static int battery_voltage_read(int32_t *millivolts, int32_t *pin_millivolts,
+				int32_t *raw_average)
 {
 	int64_t pin_mv_sum = 0;
+	int64_t raw_sum = 0;
 
 	for (size_t index = 0U;
 	     index < BATTERY_ADC_DISCARD_COUNT + BATTERY_ADC_SAMPLE_COUNT;
@@ -57,10 +61,13 @@ static int battery_voltage_read(int32_t *millivolts)
 			return err;
 		}
 		if (index >= BATTERY_ADC_DISCARD_COUNT) {
+			raw_sum += MAX(raw_sample, 0);
 			pin_mv_sum += pin_mv;
 		}
 	}
 
+	*raw_average = (int32_t)(raw_sum / BATTERY_ADC_SAMPLE_COUNT);
+	*pin_millivolts = (int32_t)(pin_mv_sum / BATTERY_ADC_SAMPLE_COUNT);
 	*millivolts = (int32_t)((pin_mv_sum *
 		(BATTERY_DIVIDER_TOP_OHMS + BATTERY_DIVIDER_BOTTOM_OHMS)) /
 		(BATTERY_ADC_SAMPLE_COUNT * BATTERY_DIVIDER_BOTTOM_OHMS));
@@ -70,11 +77,13 @@ static int battery_voltage_read(int32_t *millivolts)
 static void battery_update_work_handler(struct k_work *work)
 {
 	int32_t millivolts;
+	int32_t pin_millivolts;
+	int32_t raw_average;
 	uint8_t level;
 	int err;
 
 	ARG_UNUSED(work);
-	err = battery_voltage_read(&millivolts);
+	err = battery_voltage_read(&millivolts, &pin_millivolts, &raw_average);
 	if (err < 0) {
 		LOG_WRN("Battery ADC read failed: %d", err);
 		goto schedule_next;
@@ -82,6 +91,8 @@ static void battery_update_work_handler(struct k_work *work)
 
 	level = battery_voltage_to_percent(millivolts);
 	atomic_set(&diagnostic_battery_mv, millivolts);
+	atomic_set(&diagnostic_battery_pin_mv, pin_millivolts);
+	atomic_set(&diagnostic_battery_raw, raw_average);
 	atomic_set(&diagnostic_battery_level, level);
 	atomic_set(&diagnostic_battery_valid, 1);
 	if (!battery_level_valid || level != last_battery_level) {
@@ -127,8 +138,10 @@ void battery_diagnostic_print(void)
 		return;
 	}
 
-	printk("battery: %d mV, %u%%; update=%u ms\r\n",
+	printk("battery: %d mV (ADC pin: %d mV, raw: %d), %u%%; update=%u ms\r\n",
 	       (int)atomic_get(&diagnostic_battery_mv),
+	       (int)atomic_get(&diagnostic_battery_pin_mv),
+	       (int)atomic_get(&diagnostic_battery_raw),
 	       (unsigned int)atomic_get(&diagnostic_battery_level),
 	       BATTERY_UPDATE_PERIOD_MS);
 }
