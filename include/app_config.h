@@ -1,7 +1,7 @@
 #ifndef BLESCROLL_APP_CONFIG_H_
 #define BLESCROLL_APP_CONFIG_H_
 
-/* Common MT6701 angle geometry and the lower-resolution SAADC input. */
+/* Common encoder angle geometry and the lower-resolution AS5600/SAADC input. */
 #define ENCODER_ANGLE_RESOLUTION_BITS        14U
 #define ENCODER_ANGLE_MODULUS                (1U << ENCODER_ANGLE_RESOLUTION_BITS)
 #define ENCODER_ANGLE_MAX_CODE               (ENCODER_ANGLE_MODULUS - 1U)
@@ -18,11 +18,13 @@
 #define ENCODER_VOUT_MIN_CODE                0U
 #define ENCODER_VOUT_MAX_CODE                ENCODER_ADC_MAX_CODE
 
-/* Power-cycled idle probing. Bench data shows valid VOUT after about 32.8 ms. */
+/* Power-cycled idle probing. */
 #define ENCODER_IDLE_FAST_POLL_PERIOD_MS     100U
 #define ENCODER_IDLE_SLOW_POLL_PERIOD_MS     200U
 #define ENCODER_IDLE_FAST_DURATION_MS        10000U
-#define ENCODER_POWER_STABILIZE_MS           33U
+#define ENCODER_MT6701_POWER_STABILIZE_MS    33U
+#define ENCODER_AS5600_POWER_STABILIZE_MS    11U
+#define ENCODER_DETECTION_STABILIZE_MS       ENCODER_MT6701_POWER_STABILIZE_MS
 
 /* Active tracking. */
 #define ENCODER_ACTIVE_POLL_PERIOD_MS        2U

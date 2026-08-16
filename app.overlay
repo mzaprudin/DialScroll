@@ -5,11 +5,11 @@
 
 / {
 	zephyr,user {
-		/* MT6701 OUT -> P0.02/AIN0; battery divider -> P0.04/AIN2. */
+		/* Encoder OUT -> P0.02/AIN0; battery divider -> P0.04/AIN2. */
 		io-channels = <&adc 0>, <&adc 1>;
 
 		/*
-		 * P0.17 drives MT6701 power or, preferably, the enable input of a
+		 * P0.17 drives encoder power or, preferably, the enable input of a
 		 * 3.3 V load switch. High drive is selected for direct-power tests.
 		 */
 		encoder-power-gpios = <&gpio0 17
@@ -17,7 +17,7 @@
 	};
 };
 
-/* MT6701 digital angle: SDA=P1.00, SCL=P0.11, 400 kHz, address 0x06. */
+/* Digital angle: SDA=P1.00, SCL=P0.11, 400 kHz. */
 &i2c0 {
 	status = "okay";
 	clock-frequency = <I2C_BITRATE_FAST>;
@@ -25,6 +25,11 @@
 	mt6701: encoder@6 {
 		compatible = "magntek,mt6701";
 		reg = <0x06>;
+	};
+
+	as5600: encoder@36 {
+		compatible = "ams,as5600";
+		reg = <0x36>;
 	};
 };
 
