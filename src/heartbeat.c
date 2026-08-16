@@ -8,8 +8,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
-#define HEARTBEAT_OFF_TIME K_SECONDS(8)
-#define HEARTBEAT_ON_TIME K_MSEC(150)
+#define HEARTBEAT_OFF_TIME K_SECONDS(5)
+#define HEARTBEAT_ON_TIME K_MSEC(100)
 
 LOG_MODULE_REGISTER(heartbeat, LOG_LEVEL_INF);
 
