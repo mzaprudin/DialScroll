@@ -71,8 +71,8 @@
 	};
 };
 
-/* The status LED on nice!nano-compatible Pro Micro boards is active-low. */
+/* The status LED on this nice!nano-compatible board is active-high. */
 &led0 {
-	gpios = <&gpio0 15 GPIO_ACTIVE_LOW>;
+	gpios = <&gpio0 15 GPIO_ACTIVE_HIGH>;
 	label = "Blue LED";
 };
