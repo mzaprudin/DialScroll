@@ -1,213 +1,118 @@
-# DialScroll: BLE-колесо прокрутки на nRF52840
+# DialScroll
 
-Прошивка предназначена для ProMicro-совместимых плат nRF52840 с UF2-загрузчиком
-`nice!nano` и датчика угла MT6701. Текущий прототип:
+English · [Русский](README.RU.md)
 
-- читает абсолютный угол MT6701 через I²C (по умолчанию) или аналоговый выход/SAADC;
-- в idle включает датчик раз в 100 мс в течение 10 секунд после вращения, затем раз в 200 мс;
-- после обнаружения движения измеряет угол каждые 2 мс до 400 мс неподвижности;
-- не включает энкодер, пока нет BLE-соединения;
-- отправляет перемещение как стандартный BLE HID Mouse Wheel с Resolution Multiplier `×16`,
-  позволяет выбрать сохраняемый режим `off`/`×8`/`×16` и имеет fallback на обычное колесо;
-- передаёт заряд аккумулятора через стандартный BLE Battery Service;
-- сохраняет pairing/bonding в NVS;
-- в обычной сборке включает USB CDC только при наличии VBUS, а диагностический вывод
-  активирует одиночным байтом `D` и выключает байтом `d`.
+DialScroll is firmware for a wireless scroll wheel built around an MT6701 magnetic
+angle sensor and an nRF52840 board with a `nice!nano` UF2 bootloader. It turns
+absolute angular measurements into standard BLE HID Mouse Wheel reports.
 
-Подробные ограничения, алгоритм фильтрации и план аппаратных измерений описаны в
-[`ARCHITECTURE.md`](ARCHITECTURE.md).
+The project brings together sensor interfaces, fixed-point signal processing,
+adaptive power control and asynchronous BLE delivery in a Zephyr / nRF Connect SDK
+application. The build target and firmware files use `blescroll`; the device
+advertises as **AirScroll**.
 
-## Подключение прототипа
+## Engineering decisions
 
-| Сигнал | nRF52840 |
+| Area | Implementation and purpose |
 |---|---|
-| MT6701 Analog/VOUT | P0.02 / AIN0 |
-| MT6701 I²C SDA | P1.00 |
-| MT6701 I²C SCL | P0.11 |
-| Enable load switch питания MT6701 | P0.17, active high, high drive |
-| Контроль аккумулятора | P0.04 / AIN2, середина делителя 806 кОм / 2 МОм |
-| GND | GND |
+| Circular geometry | Both inputs share a 14-bit angle scale. Shortest signed deltas handle the transition between `16383` and `0` without a false full-turn jump. |
+| Input-specific filtering | The I²C path uses a circular EMA with `α = 1/4` and Q8 state. The ADC path unwraps eight samples around a reference, discards the minimum and maximum, and averages the remaining six. |
+| Scroll quantization | Retained remainders preserve fractional scroll steps and Q8 acceleration fractions. Runtime `off` / `×8` / `×16` modes change report granularity while preserving total distance for the same input movement. |
+| Optional acceleration | A Q8 `×1…×2` multiplier uses an 80 ms motion window and activates after 45° of continuous rotation. Direction changes and pauses reset the estimate. |
+| Sensor power control | A GPIO-controlled supply supports idle probes and active tracking. Normal operation powers the sensor only while BLE is connected; reconnection starts with a fresh baseline. |
+| BLE delivery and persistence | A work queue sends accumulated Wheel reports with a single notification in flight, bounded retries and explicit connection references. NVS stores bonds, resolution, acceleration and input selection. |
+| Bootable UF2 images | The application is linked at its physical flash address, then converted from Intel HEX to UF2 with those addresses preserved. This fixes the mismatch between relocated UF2 blocks and the reset vector. |
 
-I²C0 работает на 400 кГц, адрес MT6701 — `0x06`; прошивка включает внутренние pull-up на
-SDA/SCL, но внешние подтяжки к 3,3 В (обычно 4,7 кОм) рекомендуются для 400 кГц. Для I²C
-`MODE` должен быть HIGH (его можно оставить неподключённым благодаря внутренней подтяжке
-MT6701), `CSN` — HIGH; прошивка этими двумя входами не управляет.
-MT6701 питается от 3,3 В через load switch. Прямое питание датчика от P0.17
-допускается только для краткого лабораторного теста. Перед прошивкой нужно подтвердить,
-что совмещённый вывод Analog/PWM датчика настроен именно в Analog mode.
+The implementation is split between the hardware-facing [encoder state machine](src/encoder.c),
+testable [signal-processing functions](src/encoder_math.c),
+[BLE transport](src/ble_hid.c) and [persistent settings](src/scroll_resolution.c).
 
-Делитель аккумулятора подключён как `BAT+ → 806 кОм → P0.04 → 2 МОм → GND`.
-Прошивка восстанавливает напряжение аккумулятора с коэффициентом `2,806 / 2,000`,
-усредняет восемь измерений и раз в 60 секунд обновляет характеристику Battery Level.
-Используется стартовая таблица с линейной интерполяцией:
+## Signal pipeline
 
-| Напряжение аккумулятора | Заряд |
-|---:|---:|
-| ≤ 3,30 В | 0% |
-| 3,70 В | 50% |
-| ≥ 4,20 В | 100% |
-
-Наличие Battery Service гарантировано, но показ процента в системном интерфейсе зависит от
-BLE-стека и драйвера конкретной ОС.
-
-## Быстрая сборка
-
-В репозитории есть скрипт `build.ps1`, который сам находит toolchain для
-установленного NCS 3.2.4, настраивает окружение, собирает выбранный вариант и
-проверяет адрес первого UF2-блока, reset vector и family ID.
-
-Для платы с `SoftDevice: S140 6.1.1`:
-
-```powershell
-.\build.ps1 sd
+```mermaid
+flowchart LR
+    S["MT6701 magnetic angle"] --> I["I²C: 14-bit decode"]
+    S --> A["Analog: 12-bit SAADC"]
+    I --> E["Circular EMA · Q8 · α = 1/4"]
+    A --> T["Normalize to 14 bits<br/>8 samples → trimmed mean of 6"]
+    E --> D["Shortest circular delta<br/>and motion thresholds"]
+    T --> D
+    D --> X["Optional Q8 acceleration<br/>×1…×2"]
+    X --> R["Remainder accumulation<br/>off / ×8 / ×16"]
+    R --> Q["BLE work queue"]
+    Q --> H["HID Mouse Wheel<br/>host resolution negotiation"]
 ```
 
-Результат:
+The HID descriptor advertises a `×16` Resolution Multiplier. Hosts that enable its
+Feature report receive high-resolution units; other hosts receive legacy Wheel
+detents. The transport retains a separate remainder for that conversion.
 
-```text
-C:\dev\blescroll\build\blescroll\blescroll.uf2
-```
+## Configured behavior
 
-Для платы с `SoftDevice: not found`:
+The firmware timing, thresholds and scale are configured in
+[app_config.h](include/app_config.h).
 
-```powershell
-.\build.ps1 nosd
-```
-
-Результат:
-
-```text
-C:\dev\blescroll\build-nosd\blescroll\blescroll_nosd.uf2
-```
-
-Диагностическая сборка с USB CDC, логированием энкодера и выключенным BLE:
-
-```powershell
-.\build.ps1 nosd -Diagnostic
-```
-
-Диагностическая сборка полного тракта с USB CDC и BLE:
-
-```powershell
-.\build.ps1 nosd -DiagnosticBle
-```
-
-Startup-диагностика первых 50 мс после подачи питания:
-
-```powershell
-.\build.ps1 nosd -EncoderStartupDiagnostic
-```
-
-Если PowerShell запрещает запуск локальных скриптов:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\build.ps1 sd
-powershell -ExecutionPolicy Bypass -File .\build.ps1 nosd
-```
-
-Путь к другой версии NCS можно передать явно:
-
-```powershell
-.\build.ps1 sd -NcsRoot C:\ncs\v3.2.4
-```
-
-## Как выбрать вариант
-
-Дважды быстро нажмите Reset. На диске `NICENANO` откройте `INFO_UF2.TXT`:
-
-| Строка в `INFO_UF2.TXT` | Вариант | Начало приложения | Готовый файл |
-|---|---:|---:|---|
-| `SoftDevice: S140 6.1.1` | `sd` | `0x26000` | `blescroll.uf2` |
-| `SoftDevice: not found` | `nosd` | `0x1000` | `blescroll_nosd.uf2` |
-
-Нельзя менять эти файлы местами: UF2 может успешно скопироваться, но загрузчик
-не запустит приложение с неподходящего адреса.
-
-## Прошивка и проверка
-
-1. Дважды быстро нажмите Reset.
-2. Дождитесь диска `NICENANO`.
-3. Скопируйте на него UF2 для соответствующего варианта.
-4. Диск автоматически отключится, когда загрузчик перезагрузит плату.
-5. Найдите `AirScroll` на компьютере и выполните pairing.
-6. Поверните колесо в обе стороны и проверьте HID-прокрутку.
-7. При подключённом USB обычная прошивка создаёт COM-порт `115200 8N1`, но ничего в него
-   не выводит до получения команды.
-8. Отправьте ровно один байт `h`, без обязательных CR/LF, чтобы увидеть справку по командам.
-9. Отправьте байт `D`. Прошивка напечатает снимок BLE/HID,
-   энкодера и батареи, а затем включит текущие диагностические сообщения.
-10. Отправьте один байт `d`, чтобы выключить вывод. Отключение USB также автоматически
-   выключает диагностику и USB-периферию; BLE и прокрутка при этом продолжают работать.
-
-Полный однобайтовый протокол:
-
-| Байт | Действие |
+| State or parameter | Configuration |
 |---|---|
-| `h` | Напечатать справку, выбранный и фактически активный источник угла |
-| `D` | Включить диагностику или напечатать свежий снимок |
-| `d` | Выключить диагностический вывод |
-| `0` | Обычная дискретная прокрутка, Resolution Multiplier off (`×1`) |
-| `1` | Прокрутка `×8` |
-| `2` | Прокрутка `×16`, режим по умолчанию |
-| `A` | Включить и сохранить мягкое ускорение прокрутки `×1…×2` |
-| `a` | Выключить и сохранить ускорение прокрутки; режим по умолчанию |
-| `V` | Сохранить и выбрать аналоговый тракт ADC |
-| `v` | Сохранить и выбрать тракт I²C; режим по умолчанию |
+| Default input | MT6701 over I²C at 400 kHz, address `0x06`; ADC selectable at runtime |
+| Sensor settling time | 33 ms after power-on before an idle reading |
+| Idle probes | Every 100 ms for 10 s after motion, then every 200 ms; startup uses 200 ms |
+| Active tracking | One sample cycle every 2 ms; returns to idle after 400 ms without significant motion |
+| Motion thresholds | Idle: more than 32 counts; active: more than 16 counts on the 14-bit scale |
+| Scroll scale | 256 angle counts per detent; default resolution `×16` |
+| Acceleration | Off by default; after activation, linear from `×1` at ≤0.4 rev/s to `×2` at ≥2 rev/s |
+| Battery reporting | Eight averaged ADC readings; BLE Battery Service update every 60 s |
+| USB diagnostics | USB CDC enabled while VBUS is present; logging starts on command `D` |
 
-Выбор `0`/`1`/`2`, состояние `A`/`a` и источник `V`/`v` записываются в NVS и сохраняются
-после выключения питания и перезапуска. Смена источника применяется только после успешной
-записи NVS; текущий active-цикл завершается, питание снимается, а первое чтение нового
-источника становится baseline без BLE-события. Ускорение независимо от разрешения: после непрерывных 45° вращения
-оно линейно растёт от `×1` при скорости до `0,4 об/с` до `×2` при `2 об/с`; короткие движения,
-реверс и движение после паузы начинаются с `×1`. Инерции после остановки нет.
-Команды настройки и `h` работают даже при выключенном диагностическом выводе. Все остальные
-байты игнорируются. Специальная сборка `-DiagnosticBle` по-прежнему полезна для ранних
-стартовых сообщений: в ней USB и логи включены сразу после загрузки.
+The pin map, electrical connections, source switching and diagnostic modes are
+documented in the [architecture and hardware guide](ARCHITECTURE.md).
 
-В диагностическом выводе строка
-`High-resolution Wheel enabled (effective multiplier x16)` означает, что хост распознал
-Feature report и включил мелкие Wheel-подшаги. После изменения HID report map ранее
-сопряжённый компьютер может использовать закэшированный дескриптор; если строки нет и
-плавность не изменилась, удалите `AirScroll` из списка Bluetooth-устройств и выполните
-сопряжение заново.
+## Quick build and flash
 
-Если хост удалил устройство, а в NVS платы остался старый bond, первая попытка нового
-сопряжения может завершиться ошибкой безопасности. Прошивка удаляет только конфликтующий
-bond после disconnect и пишет `Cleared stale bond ...; retry pairing`; повторная попытка
-создаёт новый ключ.
+The Windows helper [build.ps1](build.ps1) uses an installed **nRF Connect SDK 3.2.4**
+and its registered toolchain. Run it from the checkout root after selecting the
+bootloader layout below. A different SDK location can be passed with
+`-NcsRoot C:\ncs\v3.2.4`.
 
-Ошибка готовности SAADC, I²C0 или GPIO питания завершает запуск энкодера без генерации
-фиктивной прокрутки. При I²C NACK автоматического перехода на ADC нет: питание снимается,
-baseline сбрасывается, а I²C повторяется на следующем probe. При disconnect питание MT6701 не включается; первое измерение после нового
-соединения устанавливает baseline и не воспроизводит вращение, сделанное offline.
+Double-press Reset to open the `NICENANO` drive and read `INFO_UF2.TXT`:
 
-Аппаратные пороги, направление и чувствительность в `include/app_config.h` являются
-стартовыми и требуют настройки на реальном магните и механике.
+| `INFO_UF2.TXT` entry | Command | Application start | Output for a checkout named `DialScroll` |
+|---|---|---|---|
+| `SoftDevice: S140 6.1.1` | `.\build.ps1 sd` | `0x26000` | `build/DialScroll/blescroll.uf2` |
+| `SoftDevice: not found` | `.\build.ps1 nosd` | `0x1000` | `build-nosd/DialScroll/blescroll_nosd.uf2` |
 
-## Reset vector и собственный UF2
+The helper derives the application output directory from the checkout name and
+checks the generated UF2 before reporting success. The matching flash layout
+determines which image the bootloader can start.
 
-У Cortex-M первые два слова таблицы векторов — начальный указатель стека и
-адрес обработчика Reset. Загрузчик читает их с начала раздела приложения.
+1. Copy the selected UF2 to `NICENANO`; the board reboots automatically.
+2. Pair **AirScroll** in the host's Bluetooth settings.
+3. Turn the wheel in both directions to check HID scrolling.
+4. With USB connected, open the CDC serial port at `115200 8N1` and send `h` for
+   command help or `D` for a diagnostic snapshot and live output; `d` stops output.
 
-Изначально штатная генерация UF2 в используемом NCS 3.2.4 давала противоречивый
-образ: блоки помещались с `0x26000`, но reset vector оставался `0x00000C01` и
-указывал внутрь SoftDevice. Файл записывался во флеш, однако приложение не
-запускалось.
+Single-byte commands `0` / `1` / `2` select resolution, `A` / `a` toggle
+acceleration, and `V` / `v` select ADC / I²C. These choices persist across power
+cycles. `U` requests a reboot into the UF2 bootloader.
 
-Приложение сначала линкуется по физическому адресу, а `CMakeLists.txt`
-создаёт UF2 из Intel HEX с сохранением адресов. Автоматический
-`CONFIG_BUILD_OUTPUT_UF2` отключён. Ожидаемые начала образов:
+The [full guide](ARCHITECTURE.md) covers wiring, Linux builds, diagnostic build
+profiles, the complete command protocol and pairing recovery.
 
-| Вариант | Первый UF2-блок |
-|---|---:|
-| `sd` | `0x00026000` |
-| `nosd` | `0x00001000` |
+## Verification
 
-`build.ps1` дополнительно проверяет, что reset vector находится внутри выбранной области
-приложения и имеет установленный Thumb-бит.
+The repository contains **31 ztests** in two suites configured for
+`qemu_cortex_m3`:
 
-## Светодиод Tenstar Robot
+| Suite | Coverage |
+|---|---|
+| [encoder_math](tests/encoder_math/src/main.c) · 25 tests | ADC normalization, MT6701 decoding, circular deltas and EMA, wrap-aware trimmed filtering, signed remainders, resolution distance/granularity, acceleration activation/curve/reset behavior, and the battery voltage table |
+| [scroll_settings](tests/scroll_settings/src/main.c) · 6 tests | Defaults for older settings, acceleration/input reload, invalid or malformed input selection, and retaining the current input when saving fails |
 
-`app.overlay` описывает LED этой ревизии как P0.15 с активным высоким уровнем. Heartbeat
-оставляет его выключенным 8 секунд, включает на 150 мс и повторяет этот цикл без отдельного
-потока через `k_work_delayable`.
+The [CI workflow](.github/workflows/ci.yml) runs both suites and builds five UF2
+profiles: `sd`, `nosd`, sensor diagnostics, BLE diagnostics and startup capture.
+The [UF2 verifier](tools/verify_uf2.py) checks block structure, family ID, address
+layout and the reset vector. Run status and logs are available in the repository's
+**Actions** tab.
+
+The [architecture guide](ARCHITECTURE.md) records the hardware setup, scheduling,
+error recovery and reproduction commands alongside the implementation.
