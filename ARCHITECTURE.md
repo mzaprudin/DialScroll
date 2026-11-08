@@ -6,18 +6,16 @@ DialScroll converts the absolute angle of an MT6701 magnetic sensor into a BLE H
 
 ## Signal path and module boundaries
 
-```text
-Wheel + magnet → MT6701
-                    ├─ I²C, 14-bit angle → circular Q8 EMA ────────────┐
-                    └─ VOUT → 12-bit SAADC → circular trimmed mean ──┤
-                                                                    ▼
-                      14-bit angle → shortest-arc delta → noise gate
-                                                                    ▼
-                       optional Q8 acceleration → retained remainder
-                                                                    ▼
-                       resolution granularity → bounded Wheel queue
-                                                                    ▼
-                                                BLE HID → host
+```mermaid
+flowchart TD
+    W["Wheel + magnet"] --> S["MT6701"]
+    S --> I["I²C · 14-bit angle<br/>Circular EMA"]
+    S --> A["VOUT → 12-bit SAADC<br/>Circular trimmed mean"]
+    I --> D["Common 14-bit angle<br/>Shortest delta + noise gate"]
+    A --> D
+    D --> P["Optional acceleration<br/>Remainder + resolution"]
+    P --> Q["Bounded Wheel queue"]
+    Q --> H["BLE HID → host"]
 ```
 
 | Module | Responsibility |
