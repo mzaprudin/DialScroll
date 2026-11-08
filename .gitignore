@@ -4,3 +4,4 @@ twister-out*/
 *.log
 *.csv
 artifacts/
+__pycache__/
