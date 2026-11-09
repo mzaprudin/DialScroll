@@ -30,6 +30,16 @@ flowchart LR
     B --> H["Computer"]
 ```
 
+## Enclosure
+
+3D CAD model of the enclosure.
+
+| Exploded-view animation | Section view |
+|---|---|
+| [<img src="docs/assets/DialScroll_Exploded.gif" alt="Exploded-view animation of the DialScroll enclosure CAD model" width="360">](docs/assets/DialScroll_Exploded.gif) | [<img src="docs/assets/DialScroll_Cut.png" alt="Section view of the DialScroll enclosure CAD model" width="360">](docs/assets/DialScroll_Cut.png) |
+
+[Fusion 360 (F3D)](hardware/cad/DialScroll.f3d) · [STEP](hardware/cad/DialScroll.step) · [Original animation (AVI)](docs/assets/DialScroll.avi)
+
 ## Build and flash
 
 On Windows, install the SDK and its toolchain, then run [build.ps1](build.ps1) from the

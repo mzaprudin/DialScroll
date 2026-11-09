@@ -30,6 +30,16 @@ flowchart LR
     B --> H["Компьютер"]
 ```
 
+## Корпус
+
+3D-модель корпуса.
+
+| Анимация разнесения деталей | Вид в разрезе |
+|---|---|
+| [<img src="docs/assets/DialScroll_Exploded.gif" alt="Анимация разнесения деталей 3D-модели корпуса DialScroll" width="360">](docs/assets/DialScroll_Exploded.gif) | [<img src="docs/assets/DialScroll_Cut.png" alt="Разрез 3D-модели корпуса DialScroll" width="360">](docs/assets/DialScroll_Cut.png) |
+
+[Fusion 360 (F3D)](hardware/cad/DialScroll.f3d) · [STEP](hardware/cad/DialScroll.step) · [Исходная анимация (AVI)](docs/assets/DialScroll.avi)
+
 ## Сборка и прошивка
 
 Для Windows нужны SDK и его набор инструментов; скрипт [build.ps1](build.ps1) запускается
