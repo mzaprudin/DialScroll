@@ -15,6 +15,7 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $workspace = $PSScriptRoot
+$applicationName = Split-Path $workspace -Leaf
 $zephyrBase = Join-Path $NcsRoot 'zephyr'
 $ncsVersion = Split-Path $NcsRoot -Leaf
 $ncsHome = Split-Path $NcsRoot -Parent
@@ -73,7 +74,6 @@ $diagnosticBuild = $Diagnostic -or $DiagnosticBle -or $EncoderStartupDiagnostic
 if ($Variant -eq 'nosd') {
 	$variantSuffix = '-nosd'
 	$uf2VariantSuffix = '_nosd'
-	$expectedStart = [uint32]0x1000
 	$configurationFiles = @(
 		((Join-Path $workspace 'prj.conf') -replace '\\', '/'),
 		((Join-Path $workspace 'prj_nosd.conf') -replace '\\', '/')
@@ -81,7 +81,6 @@ if ($Variant -eq 'nosd') {
 	} else {
 	$variantSuffix = ''
 	$uf2VariantSuffix = ''
-	$expectedStart = [uint32]0x26000
 	$configurationFiles = @(
 		((Join-Path $workspace 'prj.conf') -replace '\\', '/')
 	)
@@ -101,7 +100,7 @@ if ($EncoderStartupDiagnostic) {
 	$firmwareName = "blescroll{0}.uf2" -f $uf2VariantSuffix
 }
 
-$firmware = Join-Path $buildDirectory ("blescroll\{0}" -f $firmwareName)
+$firmware = Join-Path (Join-Path $buildDirectory $applicationName) $firmwareName
 
 if ($diagnosticBuild) {
     if ($configurationFiles.Count -eq 0) {
@@ -127,6 +126,7 @@ $configuration = if ($configurationFiles.Count -gt 0) {
 $westArguments = @(
     '-z', $zephyrBase,
     'build',
+    '--sysbuild',
     '-p', 'auto',
     '-b', $board,
     '-d', $buildDirectory,
@@ -147,36 +147,11 @@ if (-not (Test-Path -LiteralPath $firmware)) {
     throw "The expected UF2 file was not generated at '$firmware'."
 }
 
-$uf2 = [System.IO.File]::ReadAllBytes($firmware)
-if ($uf2.Length -lt 512) {
-    throw "The generated UF2 file is too small: $($uf2.Length) bytes."
-}
-
-$magic0 = [BitConverter]::ToUInt32($uf2, 0)
-$magic1 = [BitConverter]::ToUInt32($uf2, 4)
-$startAddress = [BitConverter]::ToUInt32($uf2, 12)
-$resetVector = [BitConverter]::ToUInt32($uf2, 36)
-$familyId = [BitConverter]::ToUInt32($uf2, 28)
-
-if ($magic0 -ne [Convert]::ToUInt32('0A324655', 16) -or
-    $magic1 -ne [Convert]::ToUInt32('9E5D5157', 16)) {
-    throw 'The generated file does not have a valid UF2 header.'
-}
-
-if ($startAddress -ne $expectedStart) {
-    throw ('Unexpected UF2 start address: 0x{0:X8}; expected 0x{1:X8}.' -f
-        $startAddress, $expectedStart)
-}
-
-if ($resetVector -lt $expectedStart -or ($resetVector -band 1) -eq 0) {
-    throw ('Invalid reset vector for this variant: 0x{0:X8}.' -f $resetVector)
-}
-
-if ($familyId -ne [Convert]::ToUInt32('ADA52840', 16)) {
-    throw ('Unexpected UF2 family ID: 0x{0:X8}.' -f $familyId)
+$validator = Join-Path $workspace 'tools\verify_uf2.py'
+& python $validator $firmware --variant $Variant
+if ($LASTEXITCODE -ne 0) {
+    throw "UF2 validation failed with exit code $LASTEXITCODE."
 }
 
 Write-Host ''
-Write-Host ('UF2 start:   0x{0:X8}' -f $startAddress)
-Write-Host ('Reset vector: 0x{0:X8}' -f $resetVector)
 Write-Host "Firmware:     $firmware" -ForegroundColor Green

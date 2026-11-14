@@ -1,205 +1,79 @@
-# Архитектура беспроводного скролла blescroll
+# DialScroll architecture
 
-- Статус: переключаемый I²C/VOUT тракт и BLE HID
-- Целевая плата: ProMicro-совместимая Tenstar Robot на nRF52840
-- Датчик угла: MT6701 (rev.1) или AS5600 (rev.2), автоопределение
-- Основная ветка разработки: `dev`
-- Базовый проверенный коммит платы и UF2: `135bf63`
+[English](ARCHITECTURE.md) · [Русский](ARCHITECTURE.RU.md) · [Project overview](README.md)
 
-## 1. Краткое решение
+DialScroll converts the absolute angle of an MT6701 or AS5600 magnetic sensor into a BLE HID mouse Wheel on an nRF52840. The sensor model is detected once at startup and retained in RAM until reset. The firmware combines circular signal processing, power scheduling and asynchronous BLE delivery. `DialScroll` is the project name, `blescroll` identifies firmware targets and settings, and `AirScroll` is the advertised Bluetooth name.
 
-MT6701 или AS5600 используется как датчик абсолютного угла. При загрузке прошивка один раз
-определяет модель по I²C-адресу и сохраняет её в RAM. По умолчанию угол читается через
-I²C0; команда диагностики может сохранить и выбрать аналоговый `VOUT/OUT`, подключённый
-к SAADC nRF52840. Квадратурные выходы A/B, QDEC и GPIO-прерывание от движения не используются.
+## Signal path and module boundaries
 
-В обычном режиме приложение поддерживает BLE-соединение и работает в `System ON`:
-
-- в `ENCODER_IDLE` датчик выключен большую часть времени;
-- раз в 100/200 мс приложение включает датчик, ждёт его запуска, измеряет угол и сравнивает его
-  с сохранённым углом;
-- если значимого изменения нет, датчик сразу выключается, а поток снова засыпает;
-- если угол изменился, датчик остаётся включённым и приложение переходит в
-  `ENCODER_ACTIVE`;
-- в active угол измеряется каждые 2 мс, циклическая разность преобразуется в относительное
-  колесо мыши и отправляется через BLE HID;
-- после 400 мс без значимого движения датчик выключается и приложение возвращается в idle.
-
-```text
-магнит и колесо
-       │
-       ▼
- MT6701/AS5600 ◄────── GPIO/load-switch enable
- I²C 14/12 бит ─────────┐
-                        ├──► угол 0…16383 ──► циклическая delta
-   VOUT ──► SAADC ──► фильтр ×8 ─┘
-                                         │
-                                         ▼
-                         масштаб и дробный остаток
-                                         │
-                                         ▼
-                              BLE HID Mouse Wheel
-                                         │
-                                         ▼
-                                    компьютер
+```mermaid
+flowchart TD
+    W["Wheel + magnet"] --> S["MT6701 / AS5600"]
+    S --> I["I²C · 14/12-bit angle<br/>Circular EMA"]
+    S --> A["VOUT / OUT → 12-bit SAADC<br/>Circular trimmed mean"]
+    I --> D["Common 14-bit angle<br/>Shortest delta + noise gate"]
+    A --> D
+    D --> P["Optional acceleration<br/>Remainder + resolution"]
+    P --> Q["Bounded Wheel queue"]
+    Q --> H["BLE HID → host"]
 ```
 
-BLE controller и системные потоки Zephyr могут просыпаться независимо от encoder-потока.
-`k_sleep()` не означает `System OFF`: между событиями ядро автоматически переходит в
-`System ON idle`, сохраняя RAM и BLE-соединение.
+| Module | Responsibility |
+|---|---|
+| [`src/main.c`](src/main.c) | Startup order and diagnostic profiles |
+| [`src/encoder.c`](src/encoder.c) | Power control, I²C/ADC reads and idle/active scheduling |
+| [`src/encoder_math.c`](src/encoder_math.c) | Circular filtering, fixed-point acceleration and Wheel scaling |
+| [`src/scroll_resolution.c`](src/scroll_resolution.c) | Persistent resolution, acceleration and angle source |
+| [`src/ble_hid.c`](src/ble_hid.c) | Advertising, bonding, HIDS and asynchronous Wheel delivery |
+| [`src/battery.c`](src/battery.c), [`src/battery_math.c`](src/battery_math.c) | Battery acquisition and voltage-to-percentage mapping |
+| [`src/diagnostics.c`](src/diagnostics.c) | VBUS-gated USB CDC, commands and runtime snapshots |
+| [`src/heartbeat.c`](src/heartbeat.c) | Status LED through delayed work |
 
-## 2. Цели и границы первой версии
+Hardware assignments live in [`app.overlay`](app.overlay); tuning constants live in [`include/app_config.h`](include/app_config.h). The math module is tested independently of sensor and Bluetooth hardware.
 
-Цели:
+## Hardware interface and battery monitoring
 
-1. Надёжно определять направление и величину обычного ручного вращения колеса.
-2. Не держать датчик постоянно включённым в неподвижном состоянии.
-3. Представляться компьютеру как стандартная BLE HID-мышь с относительной осью Wheel.
-4. Сохранять BLE-соединение между движениями.
-5. Поддерживать существующие варианты flash-разметки `sd` и `nosd`.
-6. Иметь VBUS-gated USB CDC с runtime-командами диагностики и отдельные стендовые сборки,
-   не связывая их с основным трактом.
-7. Измерить реальное потребление и подобрать чувствительность на физическом устройстве.
+The target is a Tenstar Robot ProMicro-compatible nRF52840 board with a `nice!nano`-compatible UF2 bootloader.
 
-В первую версию не входят:
+| Signal | Connection |
+|---|---|
+| MT6701 / AS5600 VDD | 3.3 V through a load switch |
+| Load-switch enable | P0.17, active high, high drive |
+| MT6701 / AS5600 GND | Common GND |
+| MT6701 / AS5600 SDA / SCL | P1.00 / P0.11, I²C0 at 400 kHz; MT6701 `0x06`, AS5600 `0x36` |
+| MT6701 Analog/VOUT / AS5600 OUT | P0.02 / AIN0 |
+| AS5600 DIR | Fixed hardware level for the required direction |
+| Battery divider midpoint | P0.04 / AIN2 |
+| Status LED | P0.15, active high |
 
-- использование A/B, Z или QDEC;
-- немедленное аппаратное пробуждение от начала вращения;
-- восстановление полного перемещения, совершённого между двумя idle-измерениями;
-- SSI как рабочий путь чтения угла;
-- программирование EEPROM MT6701 из основной прошивки;
-- инерция и сложные кривые прокрутки;
-- нормальная работа из `System OFF`;
-- сложный интерактивный протокол USB CDC помимо однобайтовых команд.
+The MT6701 I²C configuration uses MODE HIGH (or the sensor's internal pull-up) and CSN HIGH. Firmware leaves these inputs under hardware control. SDA/SCL have internal pull-ups; external pull-ups to 3.3 V, typically 4.7 kΩ, support the 400-kHz bus. A 100-nF decoupling capacitor belongs near sensor VDD. The load switch supplies the sensor; P0.17 controls its enable. Direct GPIO supply is a short bench-test configuration.
 
-## 3. Свойства и конфигурация датчиков
+For VOUT/OUT acquisition, the sensor output must be configured as Analog with the full `0…VDD` range. The default calibration endpoints are ADC codes `0` and `4095`; `ENCODER_VOUT_MIN_CODE` and `ENCODER_VOUT_MAX_CODE` support measured clamp endpoints. The ADC uses `ADC_GAIN_1_4`, `ADC_REF_VDD_1_4`, 12-bit resolution, 10-µs acquisition and Devicetree oversampling value `2`. A shared sensor/ADC supply makes the measurement ratiometric.
 
-По даташиту MT6701 Rev.1.8:
-
-| Параметр | Типовое значение | Максимум |
-|---|---:|---:|
-| Ток питания `Idd` | 10 мА | 14 мА |
-| Время запуска `TPwrUp` при быстром фронте VDD | — | 32 мс; стендовый переход 32,62–32,65 мс |
-| Разрешение аналогового DAC | 12 бит | — |
-| Ошибка ratiometric-выхода | — | ±0,3% |
-| Шум VOUT без ошибки квантования | — | 0,5 мВ RMS |
-| Выходное сопротивление VOUT | 15 Ом | 30 Ом |
-
-Аналоговый и PWM-режимы используют один физический вывод. До проверки алгоритма необходимо
-подтвердить, что EEPROM `Output Mode` настроен в Analog (`0`), а не PWM (`1`). Основная
-прошивка EEPROM не меняет.
-
-Стандартная передаточная функция VOUT линейно отображает `0…360°` в `0…VDD`. MT6701 также
-может быть запрограммирован на clamp 10–90% или другие начальную и конечную точки. Поэтому
-прошивка имеет параметры `ENCODER_VOUT_MIN_CODE` и `ENCODER_VOUT_MAX_CODE`. Начальные
-значения — `0` и `4095`; если стенд покажет другую конфигурацию, границы меняются по
-результатам измерения без записи EEPROM.
-
-AS5600 имеет фиксированный адрес `0x36`. RAW ANGLE читается из `0x0C/0x0D` как 12-битное
-значение и переводится в общий 14-битный домен сдвигом влево на два бита. После подачи
-питания прошивка ждёт 11 мс. Вывод `OUT` второй ревизии подключён к тому же AIN0 и должен
-быть настроен на полный аналоговый диапазон `0…VDD`.
-
-## 4. Электрическое подключение
-
-Рабочая схема:
-
-| Сигнал | Подключение | Назначение |
-|---|---|---|
-| MT6701 `VDD` | 3,3 В через load switch | Управляемое питание датчика |
-| MT6701 `GND` | GND | Общая земля |
-| MT6701 Analog/VOUT | P0.02 / AIN0 | Абсолютный угол через SAADC |
-| MT6701 SDA | P1.00 / I²C0 | Цифровой угол, адрес `0x06` |
-| MT6701 SCL | P0.11 / I²C0 | Тактирование 400 кГц |
-| AS5600 `VDD` | 3,3 В через load switch | Управляемое питание датчика |
-| AS5600 `OUT` | P0.02 / AIN0 | Абсолютный угол через SAADC |
-| AS5600 SDA/SCL | P1.00 / P0.11, I²C0 | Цифровой угол, адрес `0x36`, 400 кГц |
-| AS5600 `DIR` | Фиксированный уровень | То же направление роста угла, что у MT6701 |
-| Load-switch `EN` | P0.17 | Включение датчика, active high/high drive |
-| Battery divider | P0.04 / AIN2 | Измерение напряжения аккумулятора |
-| MODE | аппаратный HIGH или NC | Выбор I²C; LOW выбирает ABZ/UVW, прошивкой не управляется |
-| CSN | аппаратный HIGH | SSI отключён, прошивкой не управляется |
-| A/B/Z, SSI | не подключены к рабочему тракту | Не используются |
-
-Около VDD MT6701 нужен развязывающий конденсатор 100 нФ. Необходимо проверить схему
-конкретной breakout-платы: маркировка `VIN` может вести на собственный стабилизатор, а VOUT
-может иметь дополнительные RC-цепи. Даташит ограничивает ёмкость нагрузки VOUT значением
-1 нФ.
-
-Прошивка включает внутренние pull-up SDA/SCL; внешние подтяжки к 3,3 В (обычно 4,7 кОм)
-рекомендуются для 400 кГц. Load switch является production-вариантом.
-Прямое питание MT6701 от P0.17 с high-drive
-допускается только для короткого лабораторного теста: максимальный ток датчика и заряд
-развязывающего конденсатора не должны определять штатный режим GPIO nRF52840.
-
-SAADC настроен с `ADC_GAIN_1_4` и `ADC_REF_VDD_1_4`, поэтому полный диапазон измерения равен
-VDD. Датчик и ADC используют одно питание 3,3 В, что сохраняет ratiometric-свойство при
-небольших изменениях напряжения.
-
-Контроль аккумулятора использует второй канал SAADC. Делитель на плате подключён как
-`BAT+ → 806 кОм → P0.04/AIN2 → 2 МОм → GND`, поэтому:
+The battery divider is `BAT+ → 806 kΩ → AIN2 → 2 MΩ → GND`:
 
 ```text
-Vadc = Vbat × 2 000 000 / (806 000 + 2 000 000)
-Vbat = Vadc × 2 806 000 / 2 000 000
+Vbat = Vadc × 2,806,000 / 2,000,000
 ```
 
-При `Vbat = 4,2 В` на AIN2 получается примерно `2,99 В`. Для этого канала используются
-внутренняя опора, `ADC_GAIN_1_6` и acquisition time 40 мкс, рассчитанный на высокое
-эквивалентное сопротивление делителя.
+The battery ADC uses an internal reference, `ADC_GAIN_1_6`, 12-bit resolution and 40-µs acquisition for the high-impedance divider. Each update discards the first conversion and averages the next eight. The first update is scheduled after 1 second; subsequent updates run every 60 seconds. Linear interpolation maps 3.30 V to 0%, 3.70 V to 50% and 4.20 V to 100%, with saturation at the endpoints. This is a configurable starting curve for a single Li-ion/LiPo cell.
 
-## 5. Энергия и период idle-опроса
+The standard Battery Service (`0x180F`, Battery Level `0x2A19`) receives a new value when the percentage changes. The host's Bluetooth driver determines where the percentage appears in its UI. The heartbeat leaves the LED off for 8 seconds, then on for 150 ms, using `k_work_delayable`.
 
-В idle установленный датчик выключается через load switch. Для MT6701 это исключает
-постоянное типовое потребление около 10 мА; AS5600 получает ту же схему управления питанием.
+## Circular angle acquisition
 
-Период задаётся между началами соседних probe-циклов. В течение 10 секунд после последнего
-движения он равен 100 мс, затем увеличивается до 200 мс. Внутри каждого цикла:
+Both sources produce a common angle in `0…16383`, representing one revolution. I²C is the default source. One combined transaction reads MT6701 registers `0x03/0x04` and decodes `(msb << 6) | (lsb >> 2)`, or AS5600 RAW ANGLE registers `0x0C/0x0D` and decodes `(((msb & 0x0f) << 8) | lsb) << 2`. The latter maps the 12-bit AS5600 angle into the common 14-bit domain. Both sensors use direct register reads; the Zephyr AS5600 driver is disabled.
 
-1. подаётся питание;
-2. выдерживается 33 мс для MT6701 или 11 мс для AS5600;
-3. выполняется короткая серия ADC-измерений;
-4. при отсутствии движения питание снимается до следующего дедлайна.
+The I²C path applies an exponential moving average with Q8 state and α=`64/256`=`1/4`. Each update takes the shortest circular difference between the raw angle and filtered state, applies the correction and wraps the result modulo 16384. The first reading initializes the filter. Crossing zero therefore follows the local arc instead of averaging opposite sides of a linear scale.
 
-Без учёта времени ADC при периоде 200 мс датчик включён примерно 16,5% idle-времени. Оценка
-только его среднего тока составляет около 1,65 мА типично или до 2,31 мА по максимальному
-`Idd`. В течение 10-секундного быстрого окна эти значения удваиваются. Для аккумулятора
-1200 мА·ч connected-idle оценивается примерно в 2–3 недели, но итог зависит от частоты
-вращения, тока BLE, стабилизатора и платы и должен измеряться без USB.
+The ADC path builds one angle from eight readings:
 
-При каждой загрузке выполняется отдельный 33-мс цикл питания, после которого прошивка
-проверяет MT6701 по адресу `0x06` и AS5600 по адресу `0x36`. Ровно один успешный ответ
-выбирает протокол и рабочую задержку до следующего reset. Отсутствие обоих датчиков или
-одновременный ответ двух адресов считается ошибкой запуска.
+1. Normalize each 12-bit sample to the calibrated 14-bit angle domain.
+2. Unwrap the samples around the first sample using shortest-arc differences.
+3. Sort, discard the lowest and highest samples, and average the remaining six.
+4. Wrap the mean modulo 16384.
 
-В четырёх стендовых захватах переход VOUT MT6701 происходил воспроизводимо примерно через
-32,62–32,65 мс после включения. Поэтому используется задержка 33 мс. Она оставляет небольшой
-запас над измеренным переходом, но её пригодность на температурном диапазоне ещё требует
-проверки.
-
-## 6. Получение и фильтрация угла
-
-Внутренняя угловая шкала имеет 14 бит (`0…16383`). MT6701 `0x03/0x04` декодируется как
-`(msb << 6) | (lsb >> 2)`. AS5600 RAW ANGLE `0x0C/0x0D` декодируется как
-`(((msb & 0x0f) << 8) | lsb) << 2`. В active это одно комбинированное цифровое чтение
-на каждый 2-мс такт.
-
-В ADC-режиме один логический угол по-прежнему строится из восьми последовательных чтений
-SAADC. Devicetree также включает аппаратный oversampling SAADC, после чего 12-битный
-результат масштабируется в общую 14-битную шкалу.
-
-Линейное усреднение сырых кодов недопустимо около границы оборота: значения
-`4094, 4095, 0, 1` относятся к одному положению, но их обычное среднее близко к 180°.
-Применяется циклический trimmed mean:
-
-1. каждый ADC-код переводится из настроенного диапазона VOUT в фазу `0…16383`;
-2. первый отсчёт выбирается локальной опорой;
-3. остальные отсчёты разворачиваются относительно него по кратчайшей дуге;
-4. развёрнутые значения сортируются;
-5. по одному минимальному и максимальному отсчёту отбрасываются;
-6. оставшиеся значения усредняются и возвращаются по модулю 16384.
-
-Циклическая разность двух углов вычисляется так:
+For example, ADC values `4094, 4095, 0, 1` describe nearby positions around zero. Circular processing keeps this cluster near zero. Motion uses the same geometry:
 
 ```text
 delta = current - previous
@@ -207,486 +81,209 @@ if delta >  8192: delta -= 16384
 if delta < -8192: delta += 16384
 ```
 
-Результат представляет кратчайшее перемещение в диапазоне примерно `-180…+180°`.
+The resulting delta represents the shortest displacement between readings. A pair of absolute angles resolves motion within half a revolution; the idle cadence trades detection delay and this angular ambiguity against sensor duty cycle. Active acquisition reduces the interval after motion is detected.
 
-## 7. Ограничение абсолютного idle-опроса
+## Sensor power and scheduling
 
-VOUT сообщает положение, а не число оборотов. Между двумя чтениями прошивка не знает,
-сколько раз колесо прошло через 0°.
+Normal operation uses `System ON idle`, retaining RAM and the BLE connection between events. `encoder_run()` occupies the main thread and sleeps to absolute deadlines; Bluetooth and Zephyr work queues run in their own contexts.
 
-Следствия принятого адаптивного периода 100/200 мс:
+At every boot, firmware powers the sensor for 33 ms and probes addresses `0x06` and `0x36`, including when ADC is selected and before waiting for a BLE connection. Exactly one successful angle read selects the sensor profile. No response or responses from both addresses end encoder startup with an error; power is removed and no automatic detection retry or ADC fallback occurs. BLE, battery monitoring and USB diagnostics have already started in the normal profile and continue running.
 
-- движение, начавшееся сразу после предыдущего чтения, обнаружится не позднее следующего
-  чтения, но не мгновенно;
-- поворот более чем на половину оборота будет истолкован как более короткий путь в обратную
-  сторону;
-- поворот почти на целое число оборотов или возврат к исходному углу может быть не замечен;
-- после обнаружения движения риск уменьшается благодаря active-периоду 2 мс.
-
-Это принятое ограничение первой версии. Если стенд покажет, что оно мешает реальному
-использованию, возможны только компромиссы: сократить idle-период с ростом потребления,
-добавить отдельный low-power wake-сигнал либо вернуться к интерфейсу, аппаратно считающему
-перемещение.
-
-## 8. Состояния энкодера
-
-### 8.1 ENCODER_IDLE
-
-Состояние после загрузки и после завершения движения:
-
-- MT6701 выключен между probe-циклами;
-- при отсутствии BLE-соединения probe-циклы не выполняются вообще;
-- основной поток спит до абсолютного дедлайна следующего цикла;
-- после disconnect baseline и дробный Wheel-остаток сбрасываются;
-- после подключения первый достоверный угол становится новым baseline без Wheel-события;
-- первый успешный угол после boot сохраняется как baseline и не создаёт Wheel-событие;
-- последующие углы сравниваются с baseline циклически;
-- `abs(delta) <= 32` считается отсутствием движения;
-- подпороговый baseline не сдвигается, поэтому очень медленное движение постепенно
-  накапливается, а не исчезает при каждом опросе;
-- при ненулевом значимом delta приложение сразу обрабатывает его и переходит в active, не
-  выключая датчик.
-
-После неуспешного включения или чтения фиктивное движение не создаётся. Питание выключается,
-ошибка логируется, а следующая попытка выполняется по обычному расписанию.
-
-### 8.2 ENCODER_ACTIVE
-
-Пока колесо вращается:
-
-- MT6701 остаётся включённым;
-- измерения планируются каждые 2 мс по абсолютным дедлайнам, чтобы время обработки не
-  накапливало дрейф периода;
-- `abs(delta) <= 16` считается шумом; опорный угол не меняется, поэтому несколько малых
-  перемещений могут накопиться до значимого;
-- каждый значимый delta обновляет момент последнего движения;
-- после 400 мс без значимого delta active завершается;
-- последний измеренный угол становится baseline следующего idle-цикла;
-- питание датчика выключается, следующий idle probe назначается через 100 мс после active;
-- через 10 секунд без нового движения idle-период увеличивается до 200 мс.
-
-Если чтение ADC в active завершается ошибкой, цикл прекращается, питание снимается и
-сохраняется последний достоверный угол. Ошибка I²C завершает active, снимает питание и
-сбрасывает baseline; автоматического fallback на ADC нет, следующий probe снова использует
-I²C. Повторяющиеся ошибки I²C логируются с ограничением частоты.
-
-При смене источника active завершается на ближайшем 2-мс такте. После выключения питания
-сбрасываются baseline, Wheel-остаток и состояние ускорения; первое чтение нового источника
-только задаёт baseline. Уже поставленные в BLE-очередь события не удаляются.
-
-```text
-BOOT
-  │
-  ▼
-BASELINE ── ошибка ──► retry через текущий idle-период
-  │
-  ▼
-ENCODER_IDLE
-  │  abs(delta) > 32
-  ▼
-ENCODER_ACTIVE
-  │  400 мс без abs(delta) > 16
-  └────────────────────────────► ENCODER_IDLE
-```
-
-## 9. Преобразование угла в Wheel
-
-`raw_delta` и HID Wheel — разные единицы. Начальное линейное преобразование:
-
-```text
-scaled_remainder += direction × raw_delta
-wheel_delta = scaled_remainder / counts_per_scroll_step
-scaled_remainder %= counts_per_scroll_step
-```
-
-Стартовые параметры:
-
-- `ENCODER_SCROLL_DIRECTION = 1`, меняется после проверки механической ориентации;
-- один legacy Wheel detent соответствует `ENCODER_COUNTS_PER_SCROLL_DETENT = 64` отсчётам;
-- при включённом хостом HID Resolution Multiplier `×16` один передаваемый high-resolution
-  шаг соответствует 4 отсчётам;
-- дробный остаток сохраняется между active и idle, пока BLE подключён;
-- при отсутствии BLE остаток и готовые Wheel-события отбрасываются, чтобы старое движение
-  не воспроизводилось после позднего подключения.
-
-На хосте с поддержкой Resolution Multiplier один прежний Wheel detent представлен восемью
-малыми единицами без изменения общего пройденного расстояния. Если хост не записал Feature
-report, прошивка объединяет их обратно в legacy detent, поэтому чувствительность не
-увеличивается в восемь раз.
-
-Каждый notification забирает из очереди всю доступную delta в диапазоне signed 8-bit Wheel.
-Это убирает искусственное ограничение одним шагом на BLE-интервал и задержанный хвост после
-быстрого вращения. Внутренняя очередь насыщается на `±2048`, а сложение выполняется через
-расширенный тип, чтобы избежать signed overflow.
-
-Ускорение по скорости не применяется до проверки базовой точности и чувствительности.
-
-## 10. Программные модули и конкурентность
-
-Текущее разбиение:
-
-```text
-src/main.c           запуск BLE и энкодера
-src/encoder.c        питание, ADC/I²C, IDLE/ACTIVE и связь с BLE
-src/encoder_math.c   декодирование, циклическая математика и масштабирование
-src/scroll_resolution.c settings/NVS для разрешения, ускорения и источника угла
-src/ble_hid.c        advertising, bonding, HIDS и очередь Wheel
-src/battery.c        чтение AIN2 и обновление BLE Battery Service
-src/battery_math.c   перевод напряжения аккумулятора в проценты
-```
-
-Публичные интерфейсы первой версии:
-
-```c
-int encoder_init(void);
-void encoder_run(void);
-int ble_hid_init(void);
-void ble_hid_scroll_enqueue(int32_t delta);
-bool ble_hid_is_connected(void);
-int battery_init(void);
-```
-
-`encoder_run()` занимает main thread, но регулярно вызывает `k_sleep()`. BLE controller,
-callbacks и system work queue работают в собственных контекстах Zephyr.
-
-Правила:
-
-- BLE API отправки вызывается только из work queue, а не из ADC/таймерного ISR;
-- активное соединение защищено mutex и удерживается через `bt_conn_ref()`;
-- pending Wheel хранится атомарно;
-- одновременно отправляется не более одного notification;
-- notification callback запускает следующий фрагмент очереди;
-- disconnect очищает pending delta, retry state и notification state;
-- временная ошибка отправки повторяется каждые 5 мс, максимум 25 раз;
-- после исчерпания повторов событие отбрасывается с предупреждением, чтобы очередь не
-  блокировалась навсегда;
-- Battery Service обновляется отложенной работой независимо от main thread.
-
-Чистая математика отделена от hardware-кода для ztest без ADC и BLE.
-
-## 11. BLE HID
-
-Устройство реализует HID over GATT Profile и выглядит как мышь. Input report содержит четыре
-байта:
-
-1. три кнопки и padding, всегда ноль;
-2. X, всегда ноль;
-3. Y, всегда ноль;
-4. signed relative Wheel.
-
-Report map также содержит однобайтовый Feature report `Resolution Multiplier`. Его
-логическое значение `0` означает обычное колесо `×1`, значение `1` — эффективный множитель
-`×16`. Поддерживающий high-resolution scrolling хост выбирает `1`; диагностический лог при
-этом печатает `High-resolution Wheel enabled (effective multiplier x16)`.
-
-Пользовательский режим разрешения хранится отдельно от Feature report хоста:
-
-- `off`/`×1` выдаёт один обычный Wheel-шаг на 256 отсчётов 14-битной шкалы;
-- `×8` выдаёт восемь шагов на те же 256 отсчётов;
-- `×16` выдаёт шестнадцать шагов и используется по умолчанию.
-
-HID-дескриптор постоянно объявляет максимум `×16`: менять report map на лету нельзя без
-переобнаружения устройства. При режиме `×8` прошивка отправляет подшаги вдвое крупнее, при
-`off` — обычные дискретные шаги. Поэтому полный путь прокрутки на один оборот не меняется,
-меняется только её гранулярность. Режим сохраняется ключом `blescroll/scroll_resolution` в
-том же settings/NVS backend, что используется для bonding.
-
-Независимое мягкое ускорение хранится однобайтовым ключом `blescroll/acceleration` и по
-умолчанию выключено. После 2048 непрерывных отсчётов (45°) одного направления коэффициент Q8
-растёт линейно от `×1` при `0,4 об/с` до `×2` при `2 об/с`. Скорость считается на active-
-измерениях по восьми 10-мс корзинам; нули продвигают окно, но не добавляют путь. Реверс,
-100 мс без значимого движения, disconnect и переключение `A`/`a` сбрасывают окно, угол,
-коэффициент и дробный остаток. Масштабирование выполняется до преобразования разрешения и не
-создаёт событий после остановки.
-
-Источник угла хранится байтом `blescroll/encoder_mode`: `0` означает I²C и является
-значением по умолчанию, `1` означает ADC. Отсутствующий, старый, усечённый или неверный ключ
-игнорируется как I²C. Runtime-режим меняется только после успешного `settings_save_one()`.
-
-BLE-подсистема отвечает за:
-
-- connectable advertising с именем `AirScroll`;
-- pairing и bonding через Zephyr settings;
-- одно активное соединение;
-- security level L2;
-- HIDS connection context;
-- обработку report/boot protocol mode;
-- очистку старой прокрутки при disconnect и повторный advertising.
-
-Вместе с HIDS регистрируется стандартный Battery Service (`0x180F`) с характеристикой
-Battery Level (`0x2A19`). Оба UUID публикуются в advertising. Первое измерение выполняется
-примерно через секунду после запуска, следующие — раз в 60 секунд. Новое значение
-передаётся в BAS только при изменении процента.
-
-Напряжение преобразуется в процент по стартовой таблице с линейной интерполяцией:
-
-| Напряжение аккумулятора | Заряд |
-|---:|---:|
-| ≤ 3,30 В | 0% |
-| 3,70 В | 50% |
-| ≥ 4,20 В | 100% |
-
-Таблица является оценочной для одноэлементного Li-ion/LiPo аккумулятора и уточняется по
-измерениям под реальной нагрузкой. ОС может читать Battery Service, но отображение процента
-в системном интерфейсе зависит от её BLE HID-драйвера.
-
-Boot mouse protocol не содержит Wheel. Если хост выбирает boot mode, прошивка явно
-отбрасывает Wheel и пишет предупреждение; после возврата в report mode отправка возобновляется.
-
-Advertising-параметры берутся из `BT_LE_ADV_CONN_FAST_2`. После подключения устройство
-запрашивает connection interval 7,5–10 мс, peripheral latency 0 и supervision timeout
-420 мс. Центральное устройство принимает окончательное решение; диагностическая BLE-сборка
-выводит реально согласованный интервал в лог.
-
-Старый S140, находящийся во flash варианта `sd`, не вызывается через `sd_ble_*`. Прошивка
-использует Zephyr Bluetooth Host и controller из NCS. Сосуществование областей flash и
-загрузка на конкретной плате проверяются отдельным smoke test.
-
-## 12. USB CDC и логирование
-
-USB CDC — диагностический канал, а не часть тракта прокрутки. Обычная продуктовая сборка
-содержит CDC ACM и logging, но USB device controller работает только при наличии VBUS, а
-UART log backend по умолчанию не активен. До команды диагностики runtime-фильтры всех
-источников установлены в `LOG_LEVEL_NONE`, поэтому сообщения не форматируются и не
-накапливаются в deferred-буфере.
-
-После USB enumeration прошивка принимает одиночные байты:
-
-- `D` — активировать UART log backend, включить rate-limited encoder diagnostics и сразу
-  вывести снимок uptime, VBUS/USB, BLE connection/security/interval, HID multiplier и
-  очередь, состояния/угла энкодера и последнего измерения батареи;
-- повторный `D` — оставить диагностику включённой и напечатать свежий снимок;
-- `d` — напечатать подтверждение и отключить diagnostic output;
-- `h` — вывести справку и текущий режим разрешения;
-- `0` — сохранить режим `off`/`×1`;
-- `1` — сохранить режим `×8`;
-- `2` — сохранить режим `×16` (значение по умолчанию);
-- `A`/`a` — включить/выключить и сохранить ускорение;
-- `V` — сохранить и выбрать ADC;
-- `v` — сохранить и выбрать I²C (значение по умолчанию).
-
-Команды `h`, настройки прокрутки и `V`/`v` не требуют предварительного `D`: краткий ответ печатается прямо в
-COM-порт, после чего порт снова молчит, если диагностика не была включена. Настройка
-разрешения и источника сохраняется после перезапуска. `h` и снимок `D` показывают выбранный
-и фактически используемый источник, а также последнюю ошибку чтения. Диагностический режим намеренно не
-сохраняется и после каждого подключения VBUS снова выключен.
-
-Отключение VBUS безусловно выключает диагностику и USB controller. BLE-соединение,
-алгоритм прокрутки и питание энкодера продолжают подчиняться product-правилам. Таким
-образом, режим включается без перепрошивки, но не пытается сохраняться между отключениями.
-
-`CONFIG_BLESCROLL_DIAGNOSTIC_BLE` независимо определяет, запускается ли BLE в диагностике.
-При выключенном флаге энкодер можно исследовать через COM-порт без соединения. При включённом
-флаге используется обычное правило: MT6701 питается только при активном BLE-соединении.
-
-Опция `CONFIG_BLESCROLL_ENCODER_DIAGNOSTICS` оставляет rate-limited сообщения с углом,
-delta, Wheel и состоянием BLE постоянно включёнными в специальных диагностических сборках.
-В product-сборке те же сообщения разрешаются динамически только между `D` и `d`. Для
-измерения минимального тока USB-кабель должен быть отключён; наличие dormant-кода и данных
-во flash/RAM следует отдельно учесть при сравнении с минимальной специализированной сборкой.
-
-## 13. Обработка ошибок
-
-| Событие | Реакция |
+| State or transition | Behavior |
 |---|---|
-| GPIO/load switch не готов | `encoder_init()` завершается ошибкой, BLE не получает фиктивные события |
-| SAADC не готов | Ошибка инициализации |
-| I²C0 не готов | Ошибка инициализации |
-| Не удалось включить датчик | Логирование и повтор на следующем idle-периоде |
-| Ошибка ADC в idle | Выключить датчик, сохранить прежний baseline |
-| Ошибка ADC в active | Завершить active, выключить датчик, сохранить последний достоверный угол |
-| Ошибка/NACK I²C | Выключить датчик, сбросить baseline, повторить I²C на следующем probe без fallback |
-| Смена ADC/I²C | Завершить active, выключить питание, сбросить накопители, новый baseline без Wheel |
-| VOUT фактически содержит PWM | Остановить стендовый тест и исправить конфигурацию датчика/модуля |
-| Шум вызывает active | Проверить питание, магнит, VOUT и затем подобрать пороги |
-| Неверный знак Wheel | Изменить `ENCODER_SCROLL_DIRECTION`, EEPROM не трогать |
-| BLE notification busy/error | Повторить ограниченное число раз, затем отбросить с предупреждением |
-| BLE disconnect | Очистить готовую и дробную старую прокрутку, начать advertising |
-| Host boot mode | Не отправлять недоступный в boot protocol Wheel |
-| Brownout/reset | Чистый boot и новый baseline без Wheel-события |
+| Disconnected | Sensor remains off; tracking state and fractional Wheel remainder reset |
+| First valid reading after boot/reconnect | Capture baseline without a Wheel event; begin at the 200-ms idle cadence |
+| Idle probe | Power on, wait 33 ms for MT6701 or 11 ms for AS5600, read selected source, compare to baseline, power off if stationary |
+| Recent activity | Probe every 100 ms for 10 seconds after the last movement |
+| Settled idle | Probe every 200 ms |
+| Idle → active | `abs(delta) > 32` angle counts; process initial motion and keep sensor powered |
+| Active | Schedule reads every 2 ms; accept motion when `abs(delta) > 16` |
+| Active → idle | 400 ms without significant movement; power off and schedule next probe after 100 ms |
 
-Watchdog добавляется только после стендовой проверки времён ADC и BLE, когда определены
-корректные точки его обслуживания.
+Subthreshold samples leave the motion reference unchanged, allowing slow movement to accumulate across readings. Active deadlines advance by 2 ms rather than by processing time plus a sleep. The configured period is a scheduling target; a GPIO marker or timestamps give the actual acquisition interval, including the ADC burst and processing.
 
-## 14. Память, загрузчик и варианты сборки
+The earlier MT6701 bench investigation recorded four VOUT startup captures with the output transition at approximately **32.62–32.65 ms** after power-on. Its 33-ms stabilization constant follows that observation; the AS5600 profile uses 11 ms. The startup diagnostic profile supports repeating this capture with ADC selected as described below.
 
-Сохраняются две раскладки:
+The stabilization wait alone corresponds to a calculated duty contribution of 16.5% in settled connected idle and 33% during the fast window for MT6701, or 5.5% and 11% for AS5600. Acquisition adds to these figures. The bench procedure records whole-device current separately for advertising, connected idle and active scrolling.
 
-| Вариант | Состояние платы | Начало приложения | Команда | Результат |
-|---|---|---:|---|---|
-| `sd` | `SoftDevice: S140 6.1.1` | `0x26000` | `.\build.ps1 sd` | `build/blescroll/blescroll.uf2` |
-| `nosd` | `SoftDevice: not found` | `0x1000` | `.\build.ps1 nosd` | `build-nosd/blescroll/blescroll_nosd.uf2` |
+## Wheel resolution and fixed-point acceleration
 
-`build.ps1` после сборки проверяет UF2 magic, family ID, адрес первого блока и reset vector.
-UF2 разных вариантов нельзя менять местами.
+One legacy Wheel detent corresponds to **256 counts** of the 14-bit angle domain. The HID descriptor always advertises a Resolution Multiplier of ×16. Runtime resolution changes event granularity while preserving the distance represented by a revolution:
 
-Перед выпуском обе раскладки проходят одинаковый smoke test:
+| User mode | Angle counts per emitted chunk | Chunk in advertised ×16 units |
+|---|---:|---:|
+| `off` / ×1 | 256 | 16 |
+| ×8 | 32 | 2 |
+| ×16, default | 16 | 1 |
 
-1. загрузка и новый baseline;
-2. USB CDC диагностической сборки;
-3. BLE advertising, pairing и reconnect;
-4. HID Wheel в обе стороны;
-5. возврат в UF2 bootloader;
-6. проверка, что flash-разметка и reset vector не повреждены.
+`encoder_scroll_accumulate()` retains angular remainder between conversions, including idle/active transitions while connected. `ENCODER_SCROLL_DIRECTION` selects the sign and currently equals `1`. A host enables high-resolution units by writing the HID Feature report. For a host that leaves the feature disabled, the BLE layer accumulates ×16 units into legacy detents. This keeps total sensitivity consistent across host capabilities and user resolution modes.
 
-## 15. Стартовые параметры
+Acceleration is an independent persistent option, disabled by default. After 2048 counts (45°) of continuous motion in one direction, its Q8 factor rises linearly from ×1 at 6552 counts/s (approximately 0.4 rev/s) to ×2 at 32768 counts/s (2 rev/s). Speed uses eight 10-ms buckets, an 80-ms window, advanced by active samples. The initial displacement detected in idle is delivered at ×1 and excluded from the speed estimate.
 
-| Параметр | Значение | Основание |
-|---|---:|---|
-| SAADC resolution | 12 бит | Соответствует аналоговым выходам датчиков |
-| SAADC full scale | VDD | Ratiometric VOUT |
-| SAADC oversampling | 2 | Начальная аппаратная фильтрация |
-| I²C0 | SDA=P1.00, SCL=P0.11, 400 кГц | MT6701 `0x06`, AS5600 `0x36` |
-| Внутренняя угловая шкала | 14 бит | Полная точность I²C, общий домен для ADC |
-| Battery divider | 806 кОм / 2 МОм | Схема платы, верхний/нижний резистор |
-| Battery update | 60 с | Низкая нагрузка при достаточно свежей индикации |
-| Battery table | 3,30 В / 0%; 3,70 В / 50%; 4,20 В / 100% | Стартовая оценка Li-ion/LiPo |
-| Чтений на угол | 8 | Устойчивый короткий burst |
-| Отброшено с каждого края | 1 | Подавление единичного выброса |
-| VOUT min/max | 0/4095 | Стандартный clamp 0–100% |
-| Idle probe period | 100 мс → 200 мс через 10 с | Быстрый отклик после работы, меньший ток в покое |
-| Startup detection stabilization | 33 мс | Достаточно для определения обеих моделей |
-| Runtime power stabilization | MT6701 33 мс; AS5600 11 мс | Задержка выбранного при старте профиля |
-| Idle motion threshold | 32 counts | Те же физические 8 ADC counts в шкале ×4 |
-| Active sample period | 2 мс | 500 логических измерений/с при достаточной скорости ADC |
-| Active noise threshold | 16 counts | Те же физические 4 ADC counts в шкале ×4 |
-| Active timeout | 400 мс | Принято для защиты от переключений при коротких паузах |
-| Counts per legacy Wheel detent | 256 | Сохраняет прежнюю общую чувствительность в шкале ×4 |
-| HID Resolution Multiplier | ×16 | 16 отсчётов 14-битной шкалы на high-resolution единицу |
-| BLE preferred interval | 7,5–10 мс | Более равномерные HID Wheel reports |
-| BLE retry | 5 мс × 25 | Не блокировать очередь навсегда |
+Scaling precedes resolution conversion. Signed Q8 remainder preserves fractional movement symmetrically in both directions. Reversal, a 100-ms pause, disconnect or an acceleration setting change restarts acceleration at ×1. Zero-motion samples advance the speed window and emit zero movement, so acceleration adds no scrolling after motion stops.
 
-Если серия из восьми ADC-чтений занимает больше 2 мс, active-цикл не может физически
-поддерживать 500 Гц. Это измеряется GPIO-маркером или трассировкой; затем уменьшается число
-чтений/oversampling либо увеличивается active-период. Нельзя объявлять 500 Гц проверенными
-только по значению `k_sleep()`.
+## BLE delivery and concurrency
 
-## 16. План реализации и проверки
+The device exposes a four-byte encrypted mouse input report: buttons/padding, X, Y and signed relative Wheel. Only Wheel varies. A one-byte Feature report selects the host's effective multiplier: logical `0` gives ×1, logical `1` gives ×16. Boot mouse protocol has no Wheel field; selecting boot mode clears pending Wheel, and report mode restores delivery.
 
-### Этап 1. Программный baseline
+Advertising uses `AirScroll` and `BT_LE_ADV_CONN_FAST_2`. The firmware supports one active connection and stores up to two bonds. It requests security level L2 and a preferred connection interval of 7.5–10 ms, latency 0 and supervision timeout 420 ms. The central chooses the final parameters; diagnostics show the negotiated values. Both flash variants use the Zephyr Bluetooth stack from NCS; the `sd` name describes the existing flash layout.
 
-- собирать циклическую математику отдельным модулем;
-- проверить wrap, фильтр, знак и дробный остаток через ztest;
-- исправить обязательную конфигурацию HIDS connection context;
-- собрать `sd` и `nosd`, проверить UF2-заголовки.
+The transport separates sampling from sending:
 
-Критерий: unit-тесты проходят, обе основные конфигурации компилируются без предупреждений и
-дают UF2 с ожидаемыми адресами.
+- The encoder enqueues relative movement; Zephyr delayed work calls the HIDS send API.
+- A mutex protects the active connection and report-mode state. Sending holds a `bt_conn_ref()` reference.
+- An atomic accumulator stores pending Wheel, saturated at ±2048. Addition uses a widened intermediate.
+- One notification is in flight at a time. Each send drains up to ±127 units; its completion callback schedules the next chunk.
+- Failed sends retry at 5-ms intervals. The 25th failed attempt clears pending movement and logs a warning.
+- Disconnect clears pending delta, legacy remainder and notification/retry state, then schedules advertising.
 
-### Этап 2. VOUT и питание
+Battery updates and heartbeat also use delayed work. USB receive interrupts place command bytes in a bounded message queue; work-queue handlers perform settings changes and diagnostics outside the interrupt context.
 
-- определить точную модель и схему breakout-платы;
-- осциллографом подтвердить Analog, а не PWM mode;
-- измерить VOUT в нескольких известных положениях и найти clamp endpoints;
-- проверить фронт VDD, время стабилизации и отсутствие back-power через VOUT;
-- проверить load switch и развязывающий конденсатор.
+## Persistent settings and error behavior
 
-Критерий: после каждого включения за выбранные 32 мс получается повторяемый угол, а полный
-оборот не содержит неожиданных разрывов кроме штатного `4095→0`.
+Settings use the 32-KiB NVS storage partition below the UF2 bootloader, alongside Bluetooth bonding.
 
-### Этап 3. IDLE/ACTIVE
-
-- проверить начальный baseline без прокрутки;
-- проверить неподвижное колесо не менее часа;
-- проверить медленный переход порога и оба направления;
-- проверить wrap при вращении через 0°;
-- подтвердить осциллографом периоды 100/200 мс и 2 мс и timeout 400 мс;
-- проверить ADC/power fault paths.
-
-Критерий: обычное ручное движение переводит систему в active, не создаёт ложного скачка на
-пол-оборота и выключает датчик после остановки.
-
-### Этап 4. BLE HID
-
-- pairing/bonding с Windows как первой целевой ОС;
-- прокрутка в обе стороны, большие delta и быстрый реверс;
-- busy/retry, disconnect во время notification и reconnect;
-- подтверждение отсутствия старого Wheel после движения offline;
-- проверка report mode и осознанного поведения boot mode.
-
-Критерий: стандартный HID-драйвер ОС получает только актуальную прокрутку без зависшей
-очереди и без специальной пользовательской программы.
-
-### Этап 5. Энергия и чувствительность
-
-- измерить idle платы без датчика, idle с power-cycled MT6701, advertising, connected idle и
-  active scroll;
-- измерять без USB и encoder diagnostics;
-- подобрать пороги и `counts_per_scroll_step` по данным, а не только субъективно;
-- проверить задержку начало движения → ADC detection → видимый Wheel;
-- оценить время работы от выбранного аккумулятора.
-
-Критерий: есть таблица измеренных токов и задержек, по которой можно принять решение о
-адаптивном периоде 100/200 мс и пригодности MT6701.
-
-## 17. План измерений
-
-| Сценарий | MT6701 | BLE | USB | Что измерить |
-|---|---|---|---|---|
-| Плата без датчика | нет | off | нет | Собственный System ON idle платы |
-| Idle probes | импульсное питание | off | нет | Duty cycle, средний/пиковый ток, VOUT settle |
-| Advertising | импульсное питание | advertising | нет | Средний ток и радиоимпульсы |
-| Connected idle | импульсное питание | connected | нет | Основной пользовательский idle |
-| Rotation | постоянно включён | notifications | нет | Active average/peak и задержка Wheel |
-| Diagnostics | любой режим | любой | да | Накладные расходы USB и logging |
-
-Осциллографом или логическим анализатором наблюдаются:
-
-- enable и VDD MT6701;
-- VOUT;
-- тестовый GPIO вокруг серии SAADC;
-- тестовый GPIO при постановке HID notification;
-- время одного burst из восьми ADC-чтений;
-- фактический интервал active-измерений.
-
-## 18. Открытые аппаратные вопросы
-
-До окончательной настройки необходимо получить измерениями:
-
-1. Точную модель и схему breakout-платы MT6701.
-2. Analog/PWM EEPROM mode и фактические Clamp Low/High.
-3. Наличие на модуле стабилизатора, RC-фильтра, TVS и развязывающего конденсатора.
-4. Параметры магнита, воздушный зазор и стабильность поля.
-5. Максимальную реальную скорость колеса в первые 100 мс движения.
-6. Требуемое число Wheel steps на оборот или механический щелчок.
-7. Ёмкость аккумулятора и целевое время работы.
-8. Целевые ОС после первичной проверки Windows.
-9. Фактическое назначение физических выводов P0.02, P0.17, P1.00 и P0.11 на ревизии Tenstar Robot.
-
-Эти вопросы определяют калибровочные параметры и пригодность железа, но не меняют уже
-принятый переключаемый программный интерфейс I²C/VOUT.
-
-## 19. Зафиксированные решения
-
-| Решение | Статус |
+| Key | Values and default |
 |---|---|
-| MT6701 VOUT → nRF52840 SAADC | принято |
-| MT6701 I²C0 `0x06`, SDA=P1.00, SCL=P0.11 | принято, режим по умолчанию |
-| AS5600 I²C0 `0x36`, RAW ANGLE `0x0C/0x0D` | принято для rev.2 |
-| Однократный автодетект после 33 мс, хранение результата в RAM | принято |
-| AS5600 OUT → P0.02/AIN0, полный диапазон | принято |
-| Сохраняемое переключение I²C/ADC командами `v`/`V` | принято |
-| A/B и QDEC как основной тракт | отклонено |
-| Idle-измерения каждые 100/200 мс | принято |
-| Выключение датчика между idle probes | принято |
-| Load switch вместо штатного питания от GPIO | принято для production |
-| Active sampling каждые 2 мс | принято как стартовое, требует измерения длительности burst |
-| Возврат в idle после 400 мс неподвижности | принято |
-| Ограничение кратчайшей дуги первого idle delta | принято и документировано |
-| System ON idle в обычной работе | принято |
-| System OFF между движениями | отклонено |
-| BLE HOGP mouse wheel | принято |
-| BLE Battery Service и AIN2/P0.04 | принято |
-| Делитель аккумулятора 806 кОм сверху / 2 МОм снизу | принято по схеме |
-| Старые offline Wheel-события | отбрасываются |
-| Runtime EEPROM programming | отклонено |
-| Ускорение прокрутки | принято как опциональный сохраняемый режим |
+| `blescroll/scroll_resolution` | `0`: off, `1`: ×8, `2`: ×16; default ×16 |
+| `blescroll/acceleration` | `0`: disabled, `1`: enabled; default disabled |
+| `blescroll/encoder_mode` | `0`: I²C, `1`: ADC; default I²C |
 
-## 20. Источники
+Setters validate input and publish the new runtime value only after `settings_save_one()` succeeds. Missing or malformed source settings retain I²C. Switching source ends the active cycle, powers down and resets baseline, EMA, acceleration and angular remainder. The first reading from the new source establishes baseline. Wheel events already accepted by the BLE queue continue through transport.
 
-- MagnTek, [MT6701 Rev.1.8 datasheet](https://www.magntek.com.cn/upload/pdf/202407/MT6701_Rev.1.8.pdf), разделы Electrical Characteristics и Analog Output Mode.
-- Nordic Semiconductor, [nRF52840 Product Specification](https://docs.nordicsemi.com/bundle/nRF52840_PS_v1.9/page/keyfeatures_html5.html), SAADC и power modes.
-- Zephyr, [ADC API](https://docs.zephyrproject.org/latest/hardware/peripherals/adc.html).
-- Zephyr, I²C API и `i2c_dt_spec`.
-- Zephyr, [Devicetree binding `nordic,nrf-saadc`](https://docs.zephyrproject.org/latest/build/dts/api/bindings/adc/nordic%2Cnrf-saadc.html).
-- Исходники NCS 3.2.4: `nrf/samples/bluetooth/peripheral_hids_mouse`, HIDS service и Bluetooth connection context library.
+| Event | Firmware response |
+|---|---|
+| Power GPIO, SAADC or I²C peripheral unavailable | Encoder initialization returns an error |
+| Neither sensor found / both addresses respond at startup | Power off, return `-ENODEV` / `-EADDRINUSE`; no scrolling until a successful reboot |
+| Sensor power-on fails | Log and retry at the next idle deadline |
+| ADC read fails in idle / active | Power off; preserve baseline / end active with last valid angle |
+| I²C read fails or NACKs | Power off, reset tracking and retry I²C on the next probe; log at most once per second |
+| Settings write fails | Return the error and retain the current runtime setting |
+| BLE disconnect | Clear transport state; capture a fresh baseline after reconnect |
+| Stale peer key causes pairing failure | Mark that peer, remove its conflicting bond after disconnect, allow a fresh pairing attempt |
+| Battery read fails | Retain last reported level and schedule the next update |
+| Reset | Initialize fresh tracking state and capture baseline before sending motion |
+
+## USB diagnostics
+
+The product image enables USB CDC only while VBUS is present. Logging starts disabled, with runtime source filters at `LOG_LEVEL_NONE`. A serial terminal at `115200 8N1` can send individual bytes; CR/LF is optional and ignored.
+
+| Byte | Product-image action |
+|---|---|
+| `h` | Show help, settings, selected/active source and last read error |
+| `D` | Enable logs and print a fresh USB/BLE/encoder/battery snapshot; repeat for another snapshot |
+| `d` | Disable diagnostic output |
+| `0`, `1`, `2` | Save resolution off, ×8, ×16 |
+| `A`, `a` | Save acceleration enabled, disabled |
+| `V`, `v` | Save angle source ADC, I²C |
+| `U` | Enter UF2 bootloader after a 50-ms delay (`GPREGRET = 0x57`, cold reset) |
+
+Settings commands work with logging disabled. Disconnecting USB disables logs and the USB controller, purges queued commands and leaves BLE scrolling under its normal connection rules. Diagnostic enablement resets on USB removal; persistent settings survive power cycles.
+
+Dedicated profiles enable USB/logging from startup. `-Diagnostic` runs the encoder without BLE; `-DiagnosticBle` includes BLE and its connection gate. These profiles use streaming logs rather than the product byte-command interface. `-EncoderStartupDiagnostic` waits for any byte and captures up to 1024 samples during the first 50 ms of sensor power. CSV sample output is deferred until power-off; read-error diagnostics may be logged during capture.
+
+Startup capture uses the persisted angle source, defaulting to I²C. For a VOUT capture, command `V` in the product image first saves ADC selection. Flashing the startup profile preserves that setting; sending any byte then starts the ADC capture. Source-selection commands belong to the product image; the startup profile treats received bytes as capture triggers.
+
+## Boot layout and the UF2 fix
+
+The bootloader reads the initial stack pointer and Reset handler from the application's vector table. In the original NCS 3.2.4 build investigation, generated UF2 blocks began at `0x26000` while the Reset vector remained `0x00000C01`. Copying the image succeeded, but reset execution pointed into the reserved SoftDevice area.
+
+The fix links the application at its physical flash address and converts the linked Intel HEX with `uf2conv.py`, preserving those addresses. [`CMakeLists.txt`](CMakeLists.txt) generates this custom UF2 target; `CONFIG_BUILD_OUTPUT_UF2=n` disables the automatic path.
+
+| `INFO_UF2.TXT` entry | Variant | Application range, end exclusive | Product UF2 |
+|---|---|---|---|
+| `SoftDevice: S140 6.1.1` | `sd` | `0x26000…0xEC000` | `blescroll.uf2` |
+| `SoftDevice: not found` | `nosd` | `0x1000…0xEA000` | `blescroll_nosd.uf2` |
+
+[`tools/verify_uf2.py`](tools/verify_uf2.py) checks file size/alignment, UF2 headers, expected start address, Reset handler Thumb bit and application range, and nRF52840 family ID `0xADA52840`. The build helper and CI use this validator. Choosing the matching layout gives the bootloader a correctly addressed vector table.
+
+## Build and flash procedures
+
+The pinned SDK is [nRF Connect SDK 3.2.4](https://docs.nordicsemi.com/bundle/ncs-3.2.4/page/nrf/index.html). Commands run in its installed toolchain environment with `ZEPHYR_BASE` pointing to that SDK's `zephyr` directory. The build uses [sysbuild](https://docs.nordicsemi.com/bundle/ncs-3.2.4/page/zephyr/build/sysbuild/index.html) and board `promicro_nrf52840/nrf52840/uf2`.
+
+Windows helper commands from the checkout root:
+
+```powershell
+.\build.ps1 sd
+.\build.ps1 nosd
+.\build.ps1 nosd -Diagnostic
+.\build.ps1 nosd -DiagnosticBle
+.\build.ps1 nosd -EncoderStartupDiagnostic
+```
+
+`-NcsRoot C:\ncs\v3.2.4` selects an installation explicitly. The helper finds its registered toolchain and validates the resulting image. Sysbuild names the application subdirectory after the checkout directory. With the default checkout name `DialScroll`, outputs are:
+
+| Profile | Output |
+|---|---|
+| `sd` product | `build/DialScroll/blescroll.uf2` |
+| `nosd` product | `build-nosd/DialScroll/blescroll_nosd.uf2` |
+| `nosd` diagnostic | `build-nosd-diagnostic/DialScroll/blescroll_nosd_diagnostic.uf2` |
+| `nosd` diagnostic + BLE | `build-nosd-diagnostic-ble/DialScroll/blescroll_nosd_diagnostic_ble.uf2` |
+| `nosd` startup capture | `build-nosd-startup-diagnostic/DialScroll/blescroll_nosd_startup_diagnostic.uf2` |
+
+Portable `sd` product build, from the checkout root:
+
+```sh
+APP="$(pwd)"
+APP_NAME="${APP##*/}"
+west -z "$ZEPHYR_BASE" build --sysbuild -p always \
+  -b promicro_nrf52840/nrf52840/uf2 -d "$APP/build" "$APP" \
+  -- "-DCONF_FILE=$APP/prj.conf"
+python "$APP/tools/verify_uf2.py" \
+  "$APP/build/$APP_NAME/blescroll.uf2" --variant sd
+```
+
+For other profiles, use the corresponding build directory above and this ordered `CONF_FILE` list, prefixing each file with `$APP/`:
+
+| Profile | Configuration fragments, separated by `;` |
+|---|---|
+| `nosd` product | `prj.conf;prj_nosd.conf` |
+| `nosd` diagnostic | `prj.conf;prj_nosd.conf;prj_diagnostic.conf` |
+| `nosd` diagnostic + BLE | `prj.conf;prj_nosd.conf;prj_diagnostic.conf;prj_diagnostic_ble.conf` |
+| `nosd` startup capture | `prj.conf;prj_nosd.conf;prj_diagnostic.conf;prj_encoder_startup_diagnostic.conf` |
+
+The quoted `-DCONF_FILE=…` argument keeps the semicolon list together. Validate these images with `--variant nosd` and the corresponding filename.
+
+Flashing and first connection:
+
+1. Double-press Reset to mount `NICENANO`; read `INFO_UF2.TXT` and select the matching variant. A running product image also accepts `U` over USB CDC to enter the bootloader.
+2. Copy the validated UF2 to `NICENANO`. The volume disconnects as the board restarts.
+3. Pair with `AirScroll`, rotate both ways, stop and reconnect. The first reading establishes baseline.
+4. Connect USB, open the serial port and send `h`, then `D` for a snapshot. Send `d` to finish diagnostics.
+
+After HID descriptor changes, removing `AirScroll` from the host and pairing again refreshes the host's cached report map. The log `High-resolution Wheel enabled (effective multiplier x16)` confirms that the host selected the feature. A stale-bond message calls for another pairing attempt after the firmware clears the conflicting peer key.
+
+## Automated and hardware verification
+
+The two ztest suites contain **32 cases**: 26 for angle/battery math and six for persistent settings. They cover MT6701/AS5600 decoding, circular wrap, EMA convergence, trimmed filtering, retained remainder, resolution distance/granularity, acceleration curve and resets, battery interpolation, settings reload and failed writes.
+
+```sh
+python "$ZEPHYR_BASE/scripts/twister" -T "$APP/tests" \
+  -p qemu_cortex_m3 --inline-logs -O "$APP/twister-out"
+```
+
+[`ci.yml`](.github/workflows/ci.yml) uses the official Nordic container pinned to NCS 3.2.4. The complete run can be reproduced from the checkout root with Docker:
+
+```sh
+docker run --rm --entrypoint /bin/bash \
+  -v "$PWD:/work/DialScroll" -w /work/DialScroll \
+  ghcr.io/nrfconnect/sdk-nrf-toolchain:v3.2.4@sha256:397bac78a3e3825ce30443d4cd28c377ea6e5a28910200820967b648d95f88bb \
+  tools/ci.sh
+```
+
+[`tools/ci.sh`](tools/ci.sh) loads the toolchain environment, shallow-clones SDK tag `v3.2.4` and verifies commit `4c3fc0d44534f387a2d623eb1c85cbd2ffc8bcb6`. It initializes west from that manifest, excludes Matter, fetches the selected projects and freezes the active manifest. It then runs 10 Python standard-library tests for the UF2 validator, the 32 ztests and all five firmware builds, validating every generated UF2.
+
+Firmware images and their HEX, ELF and configuration files are collected in `artifacts/firmware/`. The complete log is `artifacts/ci.log`, the frozen manifest is `artifacts/west-manifest.yml`, and test reports remain in `twister-out/`. The UF2 validator tests also run independently from the checkout root:
+
+```sh
+python -m unittest discover -s tests/uf2 -v
+```
+
+Hardware verification exercises pairing/reconnect, both rotation directions and zero crossing, slow movement, quick reversal, resolution changes, acceleration enable/disable, source changes and USB removal during BLE scrolling. Startup capture supplies timestamped readings and errors for repeated power cycles. Power measurements use battery supply with USB disconnected, recording advertising, connected idle and active scrolling separately. A GPIO marker around acquisition measures ADC burst time and actual active intervals; a motion-to-HID trace measures response delay. These measurements guide calibration endpoints, motion thresholds and sampling cadence.
+
+## Reference material
+
+- MagnTek, [MT6701 Rev.1.8 datasheet](https://www.magntek.com.cn/upload/pdf/202407/MT6701_Rev.1.8.pdf): angle interfaces, power-on timing and analog output configuration.
+- Nordic Semiconductor, [nRF52840 Product Specification](https://docs.nordicsemi.com/bundle/nRF52840_PS_v1.9/page/keyfeatures_html5.html): SAADC, GPIO and power modes.
+- Nordic Semiconductor, [NCS 3.2.4 documentation](https://docs.nordicsemi.com/bundle/ncs-3.2.4/page/nrf/index.html) and its [sysbuild reference](https://docs.nordicsemi.com/bundle/ncs-3.2.4/page/zephyr/build/sysbuild/index.html).
+- Repository sources linked above, [`tests/`](tests/) and [`include/app_config.h`](include/app_config.h) define the implemented behavior and configuration.

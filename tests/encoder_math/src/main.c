@@ -79,7 +79,8 @@ ZTEST(encoder_math, test_filter_rejects_outliers)
 	uint16_t angle = 0U;
 
 	zassert_ok(encoder_angle_filter(samples, &angle));
-	zassert_within(angle, 1000U, 2U);
+	/* ADC code 1000 corresponds to angle 4001 on the shared 14-bit scale. */
+	zassert_within(angle, 4001U, 2U);
 }
 
 ZTEST(encoder_math, test_filter_crosses_zero_without_half_turn_glitch)
