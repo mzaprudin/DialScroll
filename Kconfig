@@ -36,7 +36,7 @@ config BLESCROLL_ENCODER_DIAGNOSTICS
 	  Disable this option in builds used for power measurements.
 
 config BLESCROLL_ENCODER_STARTUP_DIAGNOSTIC
-	bool "Measure MT6701 continuously for 50 ms after power-on"
+	bool "Measure the detected encoder continuously for 50 ms after power-on"
 	default n
 	depends on BLESCROLL_DIAGNOSTIC_MODE && SERIAL
 	help

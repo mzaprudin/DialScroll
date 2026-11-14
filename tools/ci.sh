@@ -43,9 +43,9 @@ import sys
 report = json.loads(Path(sys.argv[1]).read_text())
 suites = report["testsuites"]
 cases = [case for suite in suites for case in suite["testcases"]]
-if len(suites) != 2 or len(cases) != 31 or any(case.get("status") != "passed" for case in cases):
-    raise SystemExit("Expected two suites and 31 executed, passing ztests")
-print("Verified: two suites, 31 passing ztests")
+if len(suites) != 2 or len(cases) != 32 or any(case.get("status") != "passed" for case in cases):
+    raise SystemExit("Expected two suites and 32 executed, passing ztests")
+print("Verified: two suites, 32 passing ztests")
 PY
 
 image_directory="$(basename "$app")"

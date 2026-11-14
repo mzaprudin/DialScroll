@@ -3,7 +3,8 @@
 English · [Русский](README.RU.md)
 
 DialScroll is firmware for a wireless scroll wheel. An nRF52840 board reads an
-MT6701 angle sensor and sends wheel movements to a computer over Bluetooth (HID).
+MT6701 or AS5600 angle sensor and sends wheel movements to a computer over Bluetooth (HID).
+The connected sensor model is detected automatically at startup.
 
 Built with **Zephyr / nRF Connect SDK 3.2.4** for boards with a `nice!nano`-compatible
 UF2 bootloader. The Bluetooth name is **AirScroll**; build targets and firmware
@@ -24,7 +25,7 @@ files use `blescroll`.
 
 ```mermaid
 flowchart LR
-    S["MT6701 sensor"] --> F["Angle smoothing"]
+    S["MT6701 / AS5600 sensor"] --> F["Angle smoothing"]
     F --> M["Movement + optional acceleration"]
     M --> B["BLE"]
     B --> H["Computer"]
@@ -62,7 +63,7 @@ and algorithm details.
 
 ## Verification
 
-- **31 QEMU tests** cover [angle processing and acceleration](tests/encoder_math/src/main.c)
+- **32 QEMU tests** cover [angle processing and acceleration](tests/encoder_math/src/main.c)
   and [persistent settings](tests/scroll_settings/src/main.c).
 - **10 [UF2 tests](tests/uf2/test_verify_uf2.py)** cover image structure and boot addresses.
 - [CI](.github/workflows/ci.yml) runs these tests and builds **five firmware profiles**.

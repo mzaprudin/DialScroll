@@ -161,7 +161,7 @@ int main(void)
 			return err;
 		}
 
-		printk("\r\n=== MT6701 startup diagnostic ===\r\n");
+		printk("\r\n=== encoder startup diagnostic ===\r\n");
 		printk("Bluetooth during diagnostics: %s\r\n",
 		       bluetooth_should_start() ? "enabled" : "disabled");
 		while (true) {

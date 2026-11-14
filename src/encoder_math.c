@@ -61,6 +61,13 @@ uint16_t encoder_mt6701_decode_angle(uint8_t msb, uint8_t lsb)
 	return ((uint16_t)msb << 6) | ((uint16_t)lsb >> 2);
 }
 
+uint16_t encoder_as5600_decode_angle(uint8_t msb, uint8_t lsb)
+{
+	const uint16_t raw_angle = ((uint16_t)(msb & 0x0fU) << 8) | lsb;
+
+	return raw_angle << (ENCODER_ANGLE_RESOLUTION_BITS - 12U);
+}
+
 int16_t encoder_angle_delta(uint16_t current, uint16_t previous)
 {
 	int32_t delta = (int32_t)current - (int32_t)previous;

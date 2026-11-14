@@ -2,15 +2,15 @@
 
 [English](ARCHITECTURE.md) · [Русский](ARCHITECTURE.RU.md) · [Project overview](README.md)
 
-DialScroll converts the absolute angle of an MT6701 magnetic sensor into a BLE HID mouse Wheel on an nRF52840. The firmware combines circular signal processing, power scheduling and asynchronous BLE delivery. `DialScroll` is the project name, `blescroll` identifies firmware targets and settings, and `AirScroll` is the advertised Bluetooth name.
+DialScroll converts the absolute angle of an MT6701 or AS5600 magnetic sensor into a BLE HID mouse Wheel on an nRF52840. The sensor model is detected once at startup and retained in RAM until reset. The firmware combines circular signal processing, power scheduling and asynchronous BLE delivery. `DialScroll` is the project name, `blescroll` identifies firmware targets and settings, and `AirScroll` is the advertised Bluetooth name.
 
 ## Signal path and module boundaries
 
 ```mermaid
 flowchart TD
-    W["Wheel + magnet"] --> S["MT6701"]
-    S --> I["I²C · 14-bit angle<br/>Circular EMA"]
-    S --> A["VOUT → 12-bit SAADC<br/>Circular trimmed mean"]
+    W["Wheel + magnet"] --> S["MT6701 / AS5600"]
+    S --> I["I²C · 14/12-bit angle<br/>Circular EMA"]
+    S --> A["VOUT / OUT → 12-bit SAADC<br/>Circular trimmed mean"]
     I --> D["Common 14-bit angle<br/>Shortest delta + noise gate"]
     A --> D
     D --> P["Optional acceleration<br/>Remainder + resolution"]
@@ -37,17 +37,18 @@ The target is a Tenstar Robot ProMicro-compatible nRF52840 board with a `nice!na
 
 | Signal | Connection |
 |---|---|
-| MT6701 VDD | 3.3 V through a load switch |
+| MT6701 / AS5600 VDD | 3.3 V through a load switch |
 | Load-switch enable | P0.17, active high, high drive |
-| MT6701 GND | Common GND |
-| MT6701 SDA / SCL | P1.00 / P0.11, I²C0 at 400 kHz, address `0x06` |
-| MT6701 Analog/VOUT | P0.02 / AIN0 |
+| MT6701 / AS5600 GND | Common GND |
+| MT6701 / AS5600 SDA / SCL | P1.00 / P0.11, I²C0 at 400 kHz; MT6701 `0x06`, AS5600 `0x36` |
+| MT6701 Analog/VOUT / AS5600 OUT | P0.02 / AIN0 |
+| AS5600 DIR | Fixed hardware level for the required direction |
 | Battery divider midpoint | P0.04 / AIN2 |
 | Status LED | P0.15, active high |
 
-The I²C configuration uses MODE HIGH (or the sensor's internal pull-up) and CSN HIGH. Firmware leaves these inputs under hardware control. SDA/SCL have internal pull-ups; external pull-ups to 3.3 V, typically 4.7 kΩ, support the 400-kHz bus. A 100-nF decoupling capacitor belongs near sensor VDD. The load switch supplies the sensor; P0.17 controls its enable. Direct GPIO supply is a short bench-test configuration.
+The MT6701 I²C configuration uses MODE HIGH (or the sensor's internal pull-up) and CSN HIGH. Firmware leaves these inputs under hardware control. SDA/SCL have internal pull-ups; external pull-ups to 3.3 V, typically 4.7 kΩ, support the 400-kHz bus. A 100-nF decoupling capacitor belongs near sensor VDD. The load switch supplies the sensor; P0.17 controls its enable. Direct GPIO supply is a short bench-test configuration.
 
-For VOUT acquisition, the sensor output must be configured as Analog. The default calibration endpoints are ADC codes `0` and `4095`; `ENCODER_VOUT_MIN_CODE` and `ENCODER_VOUT_MAX_CODE` support measured clamp endpoints. The ADC uses `ADC_GAIN_1_4`, `ADC_REF_VDD_1_4`, 12-bit resolution, 10-µs acquisition and Devicetree oversampling value `2`. A shared sensor/ADC supply makes the measurement ratiometric.
+For VOUT/OUT acquisition, the sensor output must be configured as Analog with the full `0…VDD` range. The default calibration endpoints are ADC codes `0` and `4095`; `ENCODER_VOUT_MIN_CODE` and `ENCODER_VOUT_MAX_CODE` support measured clamp endpoints. The ADC uses `ADC_GAIN_1_4`, `ADC_REF_VDD_1_4`, 12-bit resolution, 10-µs acquisition and Devicetree oversampling value `2`. A shared sensor/ADC supply makes the measurement ratiometric.
 
 The battery divider is `BAT+ → 806 kΩ → AIN2 → 2 MΩ → GND`:
 
@@ -61,7 +62,7 @@ The standard Battery Service (`0x180F`, Battery Level `0x2A19`) receives a new v
 
 ## Circular angle acquisition
 
-Both sources produce a common angle in `0…16383`, representing one revolution. I²C is the default source. One combined transaction reads MT6701 registers `0x03/0x04` and decodes `(msb << 6) | (lsb >> 2)`.
+Both sources produce a common angle in `0…16383`, representing one revolution. I²C is the default source. One combined transaction reads MT6701 registers `0x03/0x04` and decodes `(msb << 6) | (lsb >> 2)`, or AS5600 RAW ANGLE registers `0x0C/0x0D` and decodes `(((msb & 0x0f) << 8) | lsb) << 2`. The latter maps the 12-bit AS5600 angle into the common 14-bit domain. Both sensors use direct register reads; the Zephyr AS5600 driver is disabled.
 
 The I²C path applies an exponential moving average with Q8 state and α=`64/256`=`1/4`. Each update takes the shortest circular difference between the raw angle and filtered state, applies the correction and wraps the result modulo 16384. The first reading initializes the filter. Crossing zero therefore follows the local arc instead of averaging opposite sides of a linear scale.
 
@@ -86,11 +87,13 @@ The resulting delta represents the shortest displacement between readings. A pai
 
 Normal operation uses `System ON idle`, retaining RAM and the BLE connection between events. `encoder_run()` occupies the main thread and sleeps to absolute deadlines; Bluetooth and Zephyr work queues run in their own contexts.
 
+At every boot, firmware powers the sensor for 33 ms and probes addresses `0x06` and `0x36`, including when ADC is selected and before waiting for a BLE connection. Exactly one successful angle read selects the sensor profile. No response or responses from both addresses end encoder startup with an error; power is removed and no automatic detection retry or ADC fallback occurs. BLE, battery monitoring and USB diagnostics have already started in the normal profile and continue running.
+
 | State or transition | Behavior |
 |---|---|
 | Disconnected | Sensor remains off; tracking state and fractional Wheel remainder reset |
 | First valid reading after boot/reconnect | Capture baseline without a Wheel event; begin at the 200-ms idle cadence |
-| Idle probe | Power on, wait 33 ms, read selected source, compare to baseline, power off if stationary |
+| Idle probe | Power on, wait 33 ms for MT6701 or 11 ms for AS5600, read selected source, compare to baseline, power off if stationary |
 | Recent activity | Probe every 100 ms for 10 seconds after the last movement |
 | Settled idle | Probe every 200 ms |
 | Idle → active | `abs(delta) > 32` angle counts; process initial motion and keep sensor powered |
@@ -99,9 +102,9 @@ Normal operation uses `System ON idle`, retaining RAM and the BLE connection bet
 
 Subthreshold samples leave the motion reference unchanged, allowing slow movement to accumulate across readings. Active deadlines advance by 2 ms rather than by processing time plus a sleep. The configured period is a scheduling target; a GPIO marker or timestamps give the actual acquisition interval, including the ADC burst and processing.
 
-The earlier bench investigation recorded four VOUT startup captures with the output transition at approximately **32.62–32.65 ms** after power-on. The current 33-ms stabilization constant follows that observation. The startup diagnostic profile supports repeating this capture with ADC selected as described below.
+The earlier MT6701 bench investigation recorded four VOUT startup captures with the output transition at approximately **32.62–32.65 ms** after power-on. Its 33-ms stabilization constant follows that observation; the AS5600 profile uses 11 ms. The startup diagnostic profile supports repeating this capture with ADC selected as described below.
 
-The stabilization wait alone corresponds to a calculated duty contribution of 33/200 = 16.5% in settled connected idle and 33/100 = 33% during the fast window. Acquisition adds to these figures. The bench procedure records whole-device current separately for advertising, connected idle and active scrolling.
+The stabilization wait alone corresponds to a calculated duty contribution of 16.5% in settled connected idle and 33% during the fast window for MT6701, or 5.5% and 11% for AS5600. Acquisition adds to these figures. The bench procedure records whole-device current separately for advertising, connected idle and active scrolling.
 
 ## Wheel resolution and fixed-point acceleration
 
@@ -151,6 +154,7 @@ Setters validate input and publish the new runtime value only after `settings_sa
 | Event | Firmware response |
 |---|---|
 | Power GPIO, SAADC or I²C peripheral unavailable | Encoder initialization returns an error |
+| Neither sensor found / both addresses respond at startup | Power off, return `-ENODEV` / `-EADDRINUSE`; no scrolling until a successful reboot |
 | Sensor power-on fails | Log and retry at the next idle deadline |
 | ADC read fails in idle / active | Power off; preserve baseline / end active with last valid angle |
 | I²C read fails or NACKs | Power off, reset tracking and retry I²C on the next probe; log at most once per second |
@@ -251,7 +255,7 @@ After HID descriptor changes, removing `AirScroll` from the host and pairing aga
 
 ## Automated and hardware verification
 
-The two ztest suites contain **31 cases**: 25 for angle/battery math and six for persistent settings. They cover decoding, circular wrap, EMA convergence, trimmed filtering, retained remainder, resolution distance/granularity, acceleration curve and resets, battery interpolation, settings reload and failed writes.
+The two ztest suites contain **32 cases**: 26 for angle/battery math and six for persistent settings. They cover MT6701/AS5600 decoding, circular wrap, EMA convergence, trimmed filtering, retained remainder, resolution distance/granularity, acceleration curve and resets, battery interpolation, settings reload and failed writes.
 
 ```sh
 python "$ZEPHYR_BASE/scripts/twister" -T "$APP/tests" \
@@ -267,7 +271,7 @@ docker run --rm --entrypoint /bin/bash \
   tools/ci.sh
 ```
 
-[`tools/ci.sh`](tools/ci.sh) loads the toolchain environment, shallow-clones SDK tag `v3.2.4` and verifies commit `4c3fc0d44534f387a2d623eb1c85cbd2ffc8bcb6`. It initializes west from that manifest, excludes Matter, fetches the selected projects and freezes the active manifest. It then runs 10 Python standard-library tests for the UF2 validator, the 31 ztests and all five firmware builds, validating every generated UF2.
+[`tools/ci.sh`](tools/ci.sh) loads the toolchain environment, shallow-clones SDK tag `v3.2.4` and verifies commit `4c3fc0d44534f387a2d623eb1c85cbd2ffc8bcb6`. It initializes west from that manifest, excludes Matter, fetches the selected projects and freezes the active manifest. It then runs 10 Python standard-library tests for the UF2 validator, the 32 ztests and all five firmware builds, validating every generated UF2.
 
 Firmware images and their HEX, ELF and configuration files are collected in `artifacts/firmware/`. The complete log is `artifacts/ci.log`, the frozen manifest is `artifacts/west-manifest.yml`, and test reports remain in `twister-out/`. The UF2 validator tests also run independently from the checkout root:
 

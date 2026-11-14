@@ -25,9 +25,16 @@
 
 LOG_MODULE_REGISTER(encoder, LOG_LEVEL_INF);
 
+BUILD_ASSERT(ENCODER_DETECTION_STABILIZE_MS >=
+	ENCODER_MT6701_POWER_STABILIZE_MS);
+BUILD_ASSERT(ENCODER_DETECTION_STABILIZE_MS >=
+	ENCODER_AS5600_POWER_STABILIZE_MS);
+
 #define USER_NODE DT_PATH(zephyr_user)
 #define MT6701_NODE DT_NODELABEL(mt6701)
+#define AS5600_NODE DT_NODELABEL(as5600)
 #define MT6701_ANGLE_REGISTER 0x03U
+#define AS5600_RAW_ANGLE_REGISTER 0x0cU
 
 #if !DT_NODE_EXISTS(USER_NODE) || !DT_NODE_HAS_PROP(USER_NODE, io_channels)
 #error "app.overlay must define zephyr,user io-channels"
@@ -41,10 +48,43 @@ LOG_MODULE_REGISTER(encoder, LOG_LEVEL_INF);
 #error "app.overlay must define the mt6701 I2C node"
 #endif
 
+#if !DT_NODE_EXISTS(AS5600_NODE)
+#error "app.overlay must define the as5600 I2C node"
+#endif
+
+enum encoder_sensor_type {
+	ENCODER_SENSOR_MT6701,
+	ENCODER_SENSOR_AS5600,
+};
+
+struct encoder_sensor_config {
+	const char *name;
+	const struct i2c_dt_spec *i2c;
+	uint32_t power_stabilize_ms;
+	uint8_t angle_register;
+	enum encoder_sensor_type type;
+};
+
 static const struct adc_dt_spec encoder_adc = ADC_DT_SPEC_GET_BY_IDX(USER_NODE, 0);
 static const struct gpio_dt_spec encoder_power =
 	GPIO_DT_SPEC_GET(USER_NODE, encoder_power_gpios);
-static const struct i2c_dt_spec encoder_i2c = I2C_DT_SPEC_GET(MT6701_NODE);
+static const struct i2c_dt_spec mt6701_i2c = I2C_DT_SPEC_GET(MT6701_NODE);
+static const struct i2c_dt_spec as5600_i2c = I2C_DT_SPEC_GET(AS5600_NODE);
+static const struct encoder_sensor_config mt6701_sensor = {
+	.name = "MT6701",
+	.i2c = &mt6701_i2c,
+	.power_stabilize_ms = ENCODER_MT6701_POWER_STABILIZE_MS,
+	.angle_register = MT6701_ANGLE_REGISTER,
+	.type = ENCODER_SENSOR_MT6701,
+};
+static const struct encoder_sensor_config as5600_sensor = {
+	.name = "AS5600",
+	.i2c = &as5600_i2c,
+	.power_stabilize_ms = ENCODER_AS5600_POWER_STABILIZE_MS,
+	.angle_register = AS5600_RAW_ANGLE_REGISTER,
+	.type = ENCODER_SENSOR_AS5600,
+};
+static const struct encoder_sensor_config *detected_sensor;
 static atomic_t encoder_power_enabled;
 static atomic_t encoder_active;
 static atomic_t encoder_runtime_mode = ATOMIC_INIT(ENCODER_MODE_DEFAULT);
@@ -111,19 +151,61 @@ static int encoder_adc_read(uint16_t *raw_adc)
 	return 0;
 }
 
-static int encoder_i2c_read(uint16_t *angle)
+static int encoder_sensor_i2c_read(
+	const struct encoder_sensor_config *sensor, uint16_t *angle)
 {
-	const uint8_t address = MT6701_ANGLE_REGISTER;
 	uint8_t registers[2];
 	int err;
 
-	err = i2c_write_read_dt(&encoder_i2c, &address, sizeof(address),
+	err = i2c_write_read_dt(sensor->i2c, &sensor->angle_register,
+				sizeof(sensor->angle_register),
 				registers, sizeof(registers));
 	if (err < 0) {
 		return err;
 	}
 
-	*angle = encoder_mt6701_decode_angle(registers[0], registers[1]);
+	if (sensor->type == ENCODER_SENSOR_MT6701) {
+		*angle = encoder_mt6701_decode_angle(registers[0], registers[1]);
+	} else {
+		*angle = encoder_as5600_decode_angle(registers[0], registers[1]);
+	}
+
+	return 0;
+}
+
+static int encoder_i2c_read(uint16_t *angle)
+{
+	if (detected_sensor == NULL) {
+		return -ENODEV;
+	}
+
+	return encoder_sensor_i2c_read(detected_sensor, angle);
+}
+
+static int encoder_sensor_detect(void)
+{
+	uint16_t angle;
+	const int mt6701_err = encoder_sensor_i2c_read(&mt6701_sensor, &angle);
+	const int as5600_err = encoder_sensor_i2c_read(&as5600_sensor, &angle);
+
+	if ((mt6701_err == 0) && (as5600_err == 0)) {
+		LOG_ERR("Both MT6701 and AS5600 responded on the encoder bus");
+		return -EADDRINUSE;
+	}
+
+	if (mt6701_err == 0) {
+		detected_sensor = &mt6701_sensor;
+	} else if (as5600_err == 0) {
+		detected_sensor = &as5600_sensor;
+	} else {
+		LOG_ERR("No encoder detected: MT6701=%d AS5600=%d",
+			mt6701_err, as5600_err);
+		return -ENODEV;
+	}
+
+	LOG_INF("Detected %s at I2C address 0x%02x; power stabilization %u ms",
+		detected_sensor->name, detected_sensor->i2c->addr,
+		detected_sensor->power_stabilize_ms);
 	return 0;
 }
 
@@ -138,7 +220,9 @@ static void encoder_read_error_record(enum encoder_mode mode, int err)
 		if ((encoder_last_i2c_error_log_ms < 0) ||
 		    ((now_ms - encoder_last_i2c_error_log_ms) >=
 		     ENCODER_I2C_ERROR_LOG_PERIOD_MS)) {
-			LOG_ERR("MT6701 I2C angle read failed: %d", err);
+			LOG_ERR("%s I2C angle read failed: %d",
+				detected_sensor != NULL ? detected_sensor->name :
+				"encoder", err);
 			encoder_last_i2c_error_log_ms = now_ms;
 		}
 	} else {
@@ -453,7 +537,9 @@ void encoder_source_diagnostic_print(void)
 		(enum encoder_mode)atomic_get(&encoder_runtime_mode);
 	const int last_error = (int)atomic_get(&encoder_last_read_error);
 
-	printk("encoder source: selected=%s active=%s last-read-error=",
+	printk("encoder source: sensor=%s selected=%s active=%s "
+	       "last-read-error=",
+	       detected_sensor != NULL ? detected_sensor->name : "none",
 	       encoder_mode_name(selected), encoder_mode_name(active_source));
 	if (last_error == 0) {
 		printk("none");
@@ -515,14 +601,18 @@ void encoder_diagnostic_print(void)
 	       "timeout=%u ms noise=%d counts\r\n",
 	       ENCODER_IDLE_FAST_POLL_PERIOD_MS,
 	       ENCODER_IDLE_SLOW_POLL_PERIOD_MS,
-	       ENCODER_POWER_STABILIZE_MS, ENCODER_ACTIVE_POLL_PERIOD_MS,
+	       detected_sensor != NULL ? detected_sensor->power_stabilize_ms : 0U,
+	       ENCODER_ACTIVE_POLL_PERIOD_MS,
 	       ENCODER_ACTIVE_TIMEOUT_MS, ENCODER_ACTIVE_NOISE_COUNTS);
 }
 
 int encoder_init(void)
 {
+	int detection_err;
+	int power_off_err;
 	int err;
 
+	detected_sensor = NULL;
 	encoder_angle_ema_reset(&encoder_i2c_ema);
 
 	if (!gpio_is_ready_dt(&encoder_power)) {
@@ -546,19 +636,36 @@ int encoder_init(void)
 		LOG_ERR("SAADC channel setup failed: %d", err);
 		return err;
 	}
-	if (!i2c_is_ready_dt(&encoder_i2c)) {
+	if (!i2c_is_ready_dt(&mt6701_i2c) || !i2c_is_ready_dt(&as5600_i2c)) {
 		LOG_ERR("I2C0 is not ready");
 		return -ENODEV;
 	}
 
+	err = encoder_power_set(true);
+	if (err < 0) {
+		return err;
+	}
+	encoder_sleep_until(k_uptime_get() + ENCODER_DETECTION_STABILIZE_MS);
+	detection_err = encoder_sensor_detect();
+	power_off_err = encoder_power_set(false);
+	if (detection_err < 0) {
+		return detection_err;
+	}
+	if (power_off_err < 0) {
+		return power_off_err;
+	}
+
 	atomic_set(&encoder_runtime_mode, encoder_mode_get());
-	LOG_INF("MT6701: ADC=AIN0/P0.02, I2C0 SDA=P1.00 SCL=P0.11 addr=0x%02x",
-		encoder_i2c.addr);
-	LOG_INF("MT6701: power=P0.17, selected=%s, idle=%u/%u ms, active=%u ms",
+	LOG_INF("Encoder: ADC=AIN0/P0.02, I2C0 SDA=P1.00 SCL=P0.11 addr=0x%02x",
+		detected_sensor->i2c->addr);
+	LOG_INF("Encoder: sensor=%s power=P0.17, selected=%s, idle=%u/%u ms, "
+		"active=%u ms",
+		detected_sensor->name,
 		encoder_mode_name(encoder_mode_get()),
 		ENCODER_IDLE_FAST_POLL_PERIOD_MS, ENCODER_IDLE_SLOW_POLL_PERIOD_MS,
 		ENCODER_ACTIVE_POLL_PERIOD_MS);
-	LOG_INF("MT6701 power stabilization is %u ms", ENCODER_POWER_STABILIZE_MS);
+	LOG_INF("%s power stabilization is %u ms", detected_sensor->name,
+		detected_sensor->power_stabilize_ms);
 
 	return 0;
 }
@@ -614,8 +721,8 @@ void encoder_startup_diagnostic_run(void)
 	}
 
 	(void)encoder_power_set(false);
-	printk("\r\n--- %s capture: %u samples, window=%u us ---\r\n",
-	       encoder_mode_name(mode), sample_count,
+	printk("\r\n--- %s %s capture: %u samples, window=%u us ---\r\n",
+	       detected_sensor->name, encoder_mode_name(mode), sample_count,
 	       ENCODER_STARTUP_CAPTURE_DURATION_US);
 	printk("source,index,start_us,end_us,raw,angle_raw,angle_cdeg,error\r\n");
 	for (uint32_t index = 0U; index < sample_count; ++index) {
@@ -688,7 +795,8 @@ void encoder_run(void)
 			continue;
 		}
 
-		k_sleep(K_MSEC(ENCODER_POWER_STABILIZE_MS));
+		encoder_sleep_until(k_uptime_get() +
+			detected_sensor->power_stabilize_ms);
 		if (encoder_mode_get() != runtime_mode) {
 			(void)encoder_power_set(false);
 			next_probe_ms = k_uptime_get();

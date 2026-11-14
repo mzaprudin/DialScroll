@@ -29,6 +29,7 @@ struct encoder_angle_ema_state {
 
 uint16_t encoder_adc_normalize(uint16_t raw_sample);
 uint16_t encoder_mt6701_decode_angle(uint8_t msb, uint8_t lsb);
+uint16_t encoder_as5600_decode_angle(uint8_t msb, uint8_t lsb);
 int16_t encoder_angle_delta(uint16_t current, uint16_t previous);
 void encoder_angle_ema_reset(struct encoder_angle_ema_state *state);
 uint16_t encoder_angle_ema_update(

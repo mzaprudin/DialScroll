@@ -26,6 +26,15 @@ ZTEST(encoder_math, test_mt6701_i2c_decode)
 		      ENCODER_ANGLE_MAX_CODE);
 }
 
+ZTEST(encoder_math, test_as5600_i2c_decode)
+{
+	zassert_equal(encoder_as5600_decode_angle(0x00U, 0x00U), 0U);
+	zassert_equal(encoder_as5600_decode_angle(0x01U, 0x23U), 0x048cU);
+	zassert_equal(encoder_as5600_decode_angle(0x0fU, 0xffU), 0x3ffcU);
+	/* Bits 15..12 are reserved and must not enter the angle domain. */
+	zassert_equal(encoder_as5600_decode_angle(0xffU, 0xffU), 0x3ffcU);
+}
+
 ZTEST(encoder_math, test_circular_delta)
 {
 	zassert_equal(encoder_angle_delta(2U, 16382U), 4);
