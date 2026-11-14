@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="400" viewBox="0 0 1200 400" role="img" aria-labelledby="title desc">
+  <title id="title">DialScroll — wireless scroll wheel</title>
+  <desc id="desc">A stylized dial with a two-way rotation arc sends movement wirelessly to a scrolling document. Firmware and enclosure CAD for a standalone Bluetooth scroll wheel.</desc>
+  <defs>
+    <marker id="rotation-arrowhead" viewBox="0 0 20 20" markerWidth="20" markerHeight="20" refX="17" refY="10" orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+      <path d="M4 3l13 7-13 7" fill="none" stroke="#e9c46a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="400" rx="24" fill="#1e292d"/>
+
+  <g id="project-title" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif">
+    <text x="52" y="157" font-size="120" font-weight="700" letter-spacing="-5" fill="#f6efdf">Dial<tspan fill="#e9c46a">Scroll</tspan></text>
+    <text x="56" y="258" font-size="48" fill="#f6efdf">Wireless</text>
+    <text x="56" y="314" font-size="48" fill="#f6efdf">scroll wheel</text>
+  </g>
+
+  <g id="wireless-scroll-dial" stroke-linecap="round" stroke-linejoin="round">
+    <g id="physical-dial">
+      <ellipse cx="902" cy="282" rx="122" ry="52" fill="#142024"/>
+      <path d="M787 186v60c0 36 51 66 115 66s115-30 115-66v-60" fill="#455356" stroke="#6a7775" stroke-width="2.5"/>
+      <path d="M806 224v47m24-28v48m27-35v48m29-40v47m30-46v46m29-51v44m27-54v39m24-59v33" fill="none" stroke="#2c3c40" stroke-width="3"/>
+      <ellipse cx="902" cy="186" rx="115" ry="66" fill="#d9ccb0" stroke="#f6efdf" stroke-width="3"/>
+      <ellipse cx="902" cy="186" rx="94" ry="53" fill="#e9dfc8" stroke="#b3a68b" stroke-width="2"/>
+      <path d="M902 136v20" fill="none" stroke="#6a756c" stroke-width="7"/>
+    </g>
+
+    <g id="rotation-direction">
+      <!-- Concentric with the dial's top ellipse: center902,186; radii143,94. -->
+      <path id="rotation-arc" d="M778.158 139A143 94 0 0 1 1025.842 139" fill="none" stroke="#e9c46a" stroke-width="4" marker-start="url(#rotation-arrowhead)" marker-end="url(#rotation-arrowhead)"/>
+    </g>
+
+    <g id="wireless-movement" fill="none" stroke="#e9c46a" stroke-width="3">
+      <path d="M1030 181q16 17 0 34m13-45q26 28 0 56"/>
+    </g>
+
+    <g id="scrolling-document" fill="none" stroke="#acb9b7" stroke-width="3">
+      <rect x="1084" y="144" width="62" height="120" rx="8" fill="#2b393e"/>
+      <path d="M1096 168h23m-23 17h17m-17 17h23m-23 17h19m-19 17h23"/>
+      <path d="M1133 164v80" stroke="#596d70"/>
+      <path d="M1133 185v24" stroke="#e9c46a" stroke-width="5"/>
+    </g>
+  </g>
+</svg>
