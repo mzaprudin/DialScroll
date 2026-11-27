@@ -108,7 +108,7 @@ The stabilization wait alone corresponds to a calculated duty contribution of 16
 
 ## Wheel resolution and fixed-point acceleration
 
-One legacy Wheel detent corresponds to **256 counts** of the 14-bit angle domain. The HID descriptor always advertises a Resolution Multiplier of ×16. Runtime resolution changes event granularity while preserving the distance represented by a revolution:
+At 100% sensitivity, one legacy Wheel detent corresponds to **256 counts** of the 14-bit angle domain. The HID descriptor always advertises a Resolution Multiplier of ×16. Runtime resolution changes event granularity while preserving the distance represented by a revolution:
 
 | User mode | Angle counts per emitted chunk | Chunk in advertised ×16 units |
 |---|---:|---:|
@@ -117,6 +117,8 @@ One legacy Wheel detent corresponds to **256 counts** of the 14-bit angle domain
 | ×16, default | 16 | 1 |
 
 `encoder_scroll_accumulate()` retains angular remainder between conversions, including idle/active transitions while connected. The persistent scroll direction selects the sign; `ENCODER_SCROLL_DIRECTION` supplies its default (`1`). Command `R` toggles between +1 and -1 for both sensors and both input sources. A direction change clears the angular remainder and resets acceleration on the next processed sample. Already queued HID movement remains valid. A host enables high-resolution units by writing the HID Feature report. For a host that leaves the feature disabled, the BLE layer accumulates ×16 units into legacy detents. This keeps total sensitivity consistent across host capabilities and user resolution modes.
+
+Sensitivity is an independent persistent setting: 100% (default), 75%, 50% or 25%. Command `S` cycles through these values in that order and saves the selection. At a fixed angle and acceleration, the emitted scroll distance scales by this percentage in every resolution mode; an unaccelerated revolution represents 64, 48, 32 or 16 legacy detents respectively. Sensitivity is applied after acceleration, so its physical speed and activation thresholds do not change. The accumulator stores quarter-counts to preserve fractional motion at 75%, 50% and 25%. Changing sensitivity clears the partial step and resets acceleration on the next processed sample; already queued HID movement remains valid.
 
 Acceleration is an independent persistent option, disabled by default. After 2048 counts (45°) of continuous motion in one direction, its Q8 factor rises linearly from ×1 at 6552 counts/s (approximately 0.4 rev/s) to ×2 at 32768 counts/s (2 rev/s). Speed uses eight 10-ms buckets, an 80-ms window, advanced by active samples. The initial displacement detected in idle is delivered at ×1 and excluded from the speed estimate.
 
@@ -149,8 +151,9 @@ Settings use the 32-KiB NVS storage partition below the UF2 bootloader, alongsid
 | `blescroll/acceleration` | `0`: disabled, `1`: enabled; default disabled |
 | `blescroll/encoder_mode` | `0`: I²C, `1`: ADC; default I²C |
 | `blescroll/scroll_direction` | `0`: +1, `1`: -1; default from `ENCODER_SCROLL_DIRECTION` (+1) |
+| `blescroll/scroll_sensitivity` | Percentage: `100`, `75`, `50`, `25`; default `100` |
 
-Setters validate input and publish the new runtime value only after `settings_save_one()` succeeds. Missing or malformed source settings retain I²C; missing or malformed direction settings retain the compiled default. Switching source ends the active cycle, powers down and resets baseline, EMA, acceleration and angular remainder. The first reading from the new source establishes baseline. Wheel events already accepted by the BLE queue continue through transport.
+Setters validate input and publish the new runtime value only after `settings_save_one()` succeeds. Missing or malformed source settings retain I²C; missing or malformed direction and sensitivity settings retain their compiled defaults. Switching source ends the active cycle, powers down and resets baseline, EMA, acceleration and angular remainder. The first reading from the new source establishes baseline. Wheel events already accepted by the BLE queue continue through transport.
 
 | Event | Firmware response |
 |---|---|
@@ -178,6 +181,7 @@ The product image enables USB CDC only while VBUS is present. Logging starts dis
 | `A`, `a` | Save acceleration enabled, disabled |
 | `V`, `v` | Save angle source ADC, I²C |
 | `R` | Toggle scroll direction (+1 / -1) and save; `h` and `D` show the current direction |
+| `S` | Cycle sensitivity 100% → 75% → 50% → 25% → 100% and save; `h` and `D` show the current percentage |
 | `U` | Enter UF2 bootloader after a 50-ms delay (`GPREGRET = 0x57`, cold reset) |
 
 Settings commands work with logging disabled. Disconnecting USB disables logs and the USB controller, purges queued commands and leaves BLE scrolling under its normal connection rules. Diagnostic enablement resets on USB removal; persistent settings survive power cycles.
@@ -257,7 +261,7 @@ After HID descriptor changes, removing `AirScroll` from the host and pairing aga
 
 ## Automated and hardware verification
 
-The two ztest suites contain **39 cases**: 28 for angle/battery math and 11 for persistent settings. They cover MT6701/AS5600 decoding, circular wrap, EMA convergence, trimmed filtering, retained remainder, resolution distance/granularity, direction switching, acceleration curve and resets, battery interpolation, settings reload and failed writes.
+The two ztest suites contain **48 cases**: 32 for angle/battery math and 16 for persistent settings. They cover MT6701/AS5600 decoding, circular wrap, EMA convergence, trimmed filtering, retained remainder, resolution distance/granularity, direction switching, sensitivity ratios and fractional motion, acceleration curve and resets, battery interpolation, settings reload and failed writes.
 
 ```sh
 python "$ZEPHYR_BASE/scripts/twister" -T "$APP/tests" \
@@ -273,7 +277,7 @@ docker run --rm --entrypoint /bin/bash \
   tools/ci.sh
 ```
 
-[`tools/ci.sh`](tools/ci.sh) loads the toolchain environment, shallow-clones SDK tag `v3.2.4` and verifies commit `4c3fc0d44534f387a2d623eb1c85cbd2ffc8bcb6`. It initializes west from that manifest, excludes Matter, fetches the selected projects and freezes the active manifest. It then runs 10 Python standard-library tests for the UF2 validator, the 39 ztests and all five firmware builds, validating every generated UF2.
+[`tools/ci.sh`](tools/ci.sh) loads the toolchain environment, shallow-clones SDK tag `v3.2.4` and verifies commit `4c3fc0d44534f387a2d623eb1c85cbd2ffc8bcb6`. It initializes west from that manifest, excludes Matter, fetches the selected projects and freezes the active manifest. It then runs 10 Python standard-library tests for the UF2 validator, the 48 ztests and all five firmware builds, validating every generated UF2.
 
 Firmware images and their HEX, ELF and configuration files are collected in `artifacts/firmware/`. The complete log is `artifacts/ci.log`, the frozen manifest is `artifacts/west-manifest.yml`, and test reports remain in `twister-out/`. The UF2 validator tests also run independently from the checkout root:
 

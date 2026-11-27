@@ -22,6 +22,7 @@
 #include "scroll_resolution.h"
 #include "scroll_acceleration.h"
 #include "scroll_direction.h"
+#include "scroll_sensitivity.h"
 
 LOG_MODULE_REGISTER(ble_hid, LOG_LEVEL_INF);
 
@@ -624,6 +625,7 @@ void ble_hid_diagnostic_print(void)
 	       scroll_acceleration_name_get());
 	printk("scroll direction: %s, persistent=yes\r\n",
 	       scroll_direction_name_get());
+	printk("scroll sensitivity: %u%%, persistent=yes\r\n", scroll_sensitivity_get());
 	if (interval != 0U) {
 		const uint32_t interval_hundredths_ms = (uint32_t)interval * 125U;
 

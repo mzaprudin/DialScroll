@@ -23,6 +23,7 @@
 #include "scroll_acceleration.h"
 #include "scroll_direction.h"
 #include "scroll_resolution.h"
+#include "scroll_sensitivity.h"
 
 LOG_MODULE_REGISTER(encoder, LOG_LEVEL_INF);
 
@@ -327,17 +328,25 @@ static void encoder_acceleration_runtime_reset(
 	encoder_acceleration_publish(acceleration);
 }
 
+struct encoder_scroll_state {
+	int32_t remainder;
+	uint8_t multiplier;
+	int8_t direction;
+	uint8_t sensitivity_percent;
+};
+
 static void encoder_tracking_reset(
 	struct encoder_acceleration_state *acceleration, bool *reference_valid,
-	int32_t *scroll_remainder, uint8_t *scroll_multiplier,
-	int8_t *scroll_direction, int64_t *last_motion_ms)
+	struct encoder_scroll_state *scroll, int64_t *last_motion_ms)
 {
 	atomic_set(&encoder_angle_valid, 0);
 	atomic_set(&encoder_last_delta, 0);
 	*reference_valid = false;
-	*scroll_remainder = 0;
-	*scroll_multiplier = scroll_resolution_multiplier_get();
-	*scroll_direction = scroll_direction_get();
+	*scroll = (struct encoder_scroll_state) {
+		.multiplier = scroll_resolution_multiplier_get(),
+		.direction = scroll_direction_get(),
+		.sensitivity_percent = scroll_sensitivity_get(),
+	};
 	encoder_acceleration_runtime_reset(acceleration);
 	encoder_angle_ema_reset(&encoder_i2c_ema);
 	*last_motion_ms = -1;
@@ -378,9 +387,7 @@ static void encoder_angle_log(
 static void encoder_motion_process(uint16_t angle, int16_t delta,
 				   bool significant, bool include_in_estimate,
 				   struct encoder_acceleration_state *acceleration,
-				   int32_t *scroll_remainder,
-				   uint8_t *scroll_multiplier,
-				   int8_t *scroll_direction,
+				   struct encoder_scroll_state *scroll,
 				   int64_t *last_diagnostic_ms,
 				   uint32_t *diagnostic_burst_remaining)
 {
@@ -394,17 +401,20 @@ static void encoder_motion_process(uint16_t angle, int16_t delta,
 		encoder_acceleration_runtime_reset(acceleration);
 		accelerated_delta = significant ? delta : 0;
 		/* Never replay motion that happened before the host connected. */
-		*scroll_remainder = 0;
+		scroll->remainder = 0;
 		scroll_delta = 0;
 	} else {
 		const uint8_t current_multiplier =
 			scroll_resolution_multiplier_get();
 		const int8_t current_direction = scroll_direction_get();
+		const uint8_t current_sensitivity = scroll_sensitivity_get();
 
-		if (*scroll_direction != current_direction) {
-			/* A partial step belongs to the previous direction. */
-			*scroll_remainder = 0;
-			*scroll_direction = current_direction;
+		if ((scroll->direction != current_direction) ||
+		    (scroll->sensitivity_percent != current_sensitivity)) {
+			/* A partial step belongs to the previous direction/sensitivity. */
+			scroll->remainder = 0;
+			scroll->direction = current_direction;
+			scroll->sensitivity_percent = current_sensitivity;
 			encoder_acceleration_runtime_reset(acceleration);
 		}
 
@@ -413,16 +423,16 @@ static void encoder_motion_process(uint16_t angle, int16_t delta,
 			scroll_acceleration_get(), include_in_estimate);
 		encoder_acceleration_publish(acceleration);
 
-		if (*scroll_multiplier != current_multiplier) {
+		if (scroll->multiplier != current_multiplier) {
 			/* Do not reinterpret a partial step accumulated using the old
 			 * granularity. Already queued HID units remain valid x16 units.
 			 */
-			*scroll_remainder = 0;
-			*scroll_multiplier = current_multiplier;
+			scroll->remainder = 0;
+			scroll->multiplier = current_multiplier;
 		}
 		scroll_delta = encoder_scroll_accumulate(
 			accelerated_delta, current_multiplier, current_direction,
-			scroll_remainder);
+			current_sensitivity, &scroll->remainder);
 	}
 
 	if (scroll_delta != 0) {
@@ -451,8 +461,7 @@ enum encoder_active_exit {
 static enum encoder_active_exit encoder_active_run(
 	enum encoder_mode mode, uint16_t first_angle, int16_t first_delta,
 	struct encoder_acceleration_state *acceleration,
-	int32_t *scroll_remainder, uint8_t *scroll_multiplier,
-	int8_t *scroll_direction, int64_t *last_motion_out_ms,
+	struct encoder_scroll_state *scroll, int64_t *last_motion_out_ms,
 	uint16_t *last_angle_out)
 {
 	uint16_t reference_angle = first_angle;
@@ -471,8 +480,7 @@ static enum encoder_active_exit encoder_active_run(
 		goto out;
 	}
 	encoder_motion_process(first_angle, first_delta, true, false, acceleration,
-			       scroll_remainder,
-			       scroll_multiplier, scroll_direction,
+			       scroll,
 			       &last_diagnostic_ms, &diagnostic_burst_remaining);
 
 	while (true) {
@@ -514,8 +522,7 @@ static enum encoder_active_exit encoder_active_run(
 		delta = encoder_angle_delta(sampled_angle, reference_angle);
 		if (abs(delta) <= ENCODER_ACTIVE_NOISE_COUNTS) {
 			encoder_motion_process(sampled_angle, delta, false, true,
-				       acceleration, scroll_remainder,
-				       scroll_multiplier, scroll_direction,
+				       acceleration, scroll,
 				       &last_diagnostic_ms,
 				       &diagnostic_burst_remaining);
 			continue;
@@ -524,8 +531,7 @@ static enum encoder_active_exit encoder_active_run(
 		reference_angle = sampled_angle;
 		last_motion_ms = k_uptime_get();
 		encoder_motion_process(sampled_angle, delta, true, true,
-				       acceleration, scroll_remainder,
-				       scroll_multiplier, scroll_direction,
+				       acceleration, scroll,
 				       &last_diagnostic_ms,
 				       &diagnostic_burst_remaining);
 	}
@@ -762,9 +768,11 @@ void encoder_run(void)
 {
 	uint16_t idle_reference = 0U;
 	struct encoder_acceleration_state acceleration;
-	int32_t scroll_remainder = 0;
-	uint8_t scroll_multiplier = scroll_resolution_multiplier_get();
-	int8_t scroll_direction = scroll_direction_get();
+	struct encoder_scroll_state scroll = {
+		.multiplier = scroll_resolution_multiplier_get(),
+		.direction = scroll_direction_get(),
+		.sensitivity_percent = scroll_sensitivity_get(),
+	};
 	bool reference_valid = false;
 	int64_t last_motion_ms = -1;
 	int64_t next_probe_ms = k_uptime_get();
@@ -787,8 +795,7 @@ void encoder_run(void)
 			runtime_mode = encoder_mode_get();
 			atomic_set(&encoder_runtime_mode, runtime_mode);
 			encoder_tracking_reset(&acceleration, &reference_valid,
-				&scroll_remainder, &scroll_multiplier,
-				&scroll_direction, &last_motion_ms);
+				&scroll, &last_motion_ms);
 			LOG_INF("Encoder runtime source is now %s; tracking reset",
 				encoder_mode_name(runtime_mode));
 		}
@@ -796,8 +803,7 @@ void encoder_run(void)
 		if (encoder_requires_ble_connection() && !ble_hid_is_connected()) {
 			/* Ignore all motion while there is no host to receive it. */
 			encoder_tracking_reset(&acceleration, &reference_valid,
-				&scroll_remainder, &scroll_multiplier,
-				&scroll_direction, &last_motion_ms);
+				&scroll, &last_motion_ms);
 			next_probe_ms = now_ms + ENCODER_IDLE_SLOW_POLL_PERIOD_MS;
 			continue;
 		}
@@ -826,8 +832,7 @@ void encoder_run(void)
 			}
 			if (runtime_mode == ENCODER_MODE_I2C) {
 				encoder_tracking_reset(&acceleration, &reference_valid,
-					&scroll_remainder, &scroll_multiplier,
-					&scroll_direction, &last_motion_ms);
+					&scroll, &last_motion_ms);
 			}
 			continue;
 		}
@@ -857,16 +862,14 @@ void encoder_run(void)
 
 		active_exit = encoder_active_run(
 			runtime_mode, angle, delta, &acceleration,
-			&scroll_remainder, &scroll_multiplier, &scroll_direction,
-			&last_motion_ms,
+			&scroll, &last_motion_ms,
 			&idle_reference);
 		(void)encoder_power_set(false);
 		if ((active_exit == ENCODER_ACTIVE_EXIT_MODE_CHANGED) ||
 		    ((active_exit == ENCODER_ACTIVE_EXIT_READ_ERROR) &&
 		     (runtime_mode == ENCODER_MODE_I2C))) {
 			encoder_tracking_reset(&acceleration, &reference_valid,
-				&scroll_remainder, &scroll_multiplier,
-				&scroll_direction, &last_motion_ms);
+				&scroll, &last_motion_ms);
 		} else {
 			reference_valid = true;
 		}

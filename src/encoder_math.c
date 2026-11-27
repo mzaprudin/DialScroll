@@ -1,4 +1,5 @@
 #include "encoder_math.h"
+#include "scroll_sensitivity.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -180,24 +181,33 @@ int encoder_angle_filter(const uint16_t samples[ENCODER_FILTER_SAMPLE_COUNT],
 }
 
 int32_t encoder_scroll_accumulate(int32_t delta, uint8_t resolution_multiplier,
-				  int8_t direction, int32_t *remainder)
+				  int8_t direction, uint8_t sensitivity_percent,
+				  int32_t *remainder)
 {
-	const int32_t directed_delta = delta * direction;
+	const int32_t counts_scale = SCROLL_SENSITIVITY_MAX_PERCENT /
+		SCROLL_SENSITIVITY_STEP_PERCENT;
+	const int32_t sensitivity_quarters = sensitivity_percent /
+		SCROLL_SENSITIVITY_STEP_PERCENT;
 	int32_t counts_per_step;
 	int32_t report_units_per_step;
 	int32_t scroll_delta;
 
 	if ((remainder == NULL) || ((direction != 1) && (direction != -1)) ||
+	    !scroll_sensitivity_percent_valid(sensitivity_percent) ||
 	    (resolution_multiplier == 0U) ||
 	    ((BLE_HID_WHEEL_RESOLUTION_MULTIPLIER % resolution_multiplier) != 0U) ||
 	    ((ENCODER_COUNTS_PER_SCROLL_DETENT % resolution_multiplier) != 0U)) {
 		return 0;
 	}
-	counts_per_step = ENCODER_COUNTS_PER_SCROLL_DETENT / resolution_multiplier;
+	counts_per_step = (ENCODER_COUNTS_PER_SCROLL_DETENT / resolution_multiplier) *
+		counts_scale;
 	report_units_per_step =
 		BLE_HID_WHEEL_RESOLUTION_MULTIPLIER / resolution_multiplier;
 
-	*remainder += directed_delta;
+	/* Quarter-counts represent every preset exactly, including 75%, without
+	 * rounding away individual slow samples. Scale after acceleration.
+	 */
+	*remainder += delta * direction * sensitivity_quarters;
 	scroll_delta = *remainder / counts_per_step;
 	*remainder -= scroll_delta * counts_per_step;
 

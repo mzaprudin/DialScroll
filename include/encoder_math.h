@@ -36,8 +36,10 @@ uint16_t encoder_angle_ema_update(
 	struct encoder_angle_ema_state *state, uint16_t raw_angle);
 int encoder_angle_filter(const uint16_t samples[ENCODER_FILTER_SAMPLE_COUNT],
 			 uint16_t *angle);
+/* Remainder uses quarter-counts to retain fractional sensitivity movement. */
 int32_t encoder_scroll_accumulate(int32_t delta, uint8_t resolution_multiplier,
-				  int8_t direction, int32_t *remainder);
+				  int8_t direction, uint8_t sensitivity_percent,
+				  int32_t *remainder);
 void encoder_acceleration_reset(struct encoder_acceleration_state *state,
 				bool enabled);
 uint16_t encoder_acceleration_factor_q8(uint32_t speed_counts_per_s);

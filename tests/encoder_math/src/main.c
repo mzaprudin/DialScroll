@@ -113,16 +113,16 @@ ZTEST(encoder_math, test_scroll_accumulator_preserves_remainder)
 	const int16_t almost_one_step = counts_per_step - 1;
 
 	zassert_equal(encoder_scroll_accumulate(almost_one_step,
-		BLE_HID_WHEEL_RESOLUTION_MULTIPLIER, ENCODER_SCROLL_DIRECTION, &remainder), 0);
-	zassert_equal(remainder, almost_one_step * direction);
+		BLE_HID_WHEEL_RESOLUTION_MULTIPLIER, ENCODER_SCROLL_DIRECTION, 100U, &remainder), 0);
+	zassert_equal(remainder, 4 * almost_one_step * direction);
 	zassert_equal(encoder_scroll_accumulate(1,
-		BLE_HID_WHEEL_RESOLUTION_MULTIPLIER, ENCODER_SCROLL_DIRECTION, &remainder), direction);
+		BLE_HID_WHEEL_RESOLUTION_MULTIPLIER, ENCODER_SCROLL_DIRECTION, 100U, &remainder), direction);
 	zassert_equal(remainder, 0);
 	zassert_equal(encoder_scroll_accumulate(
 		-(int16_t)(counts_per_step + 1),
-		BLE_HID_WHEEL_RESOLUTION_MULTIPLIER, ENCODER_SCROLL_DIRECTION, &remainder),
+		BLE_HID_WHEEL_RESOLUTION_MULTIPLIER, ENCODER_SCROLL_DIRECTION, 100U, &remainder),
 		-direction);
-	zassert_equal(remainder, -direction);
+	zassert_equal(remainder, -4 * direction);
 }
 
 ZTEST(encoder_math, test_one_detent_produces_all_high_resolution_units)
@@ -131,7 +131,7 @@ ZTEST(encoder_math, test_one_detent_produces_all_high_resolution_units)
 
 	zassert_equal(encoder_scroll_accumulate(
 		ENCODER_COUNTS_PER_SCROLL_DETENT,
-		BLE_HID_WHEEL_RESOLUTION_MULTIPLIER, ENCODER_SCROLL_DIRECTION, &remainder),
+		BLE_HID_WHEEL_RESOLUTION_MULTIPLIER, ENCODER_SCROLL_DIRECTION, 100U, &remainder),
 		ENCODER_SCROLL_DIRECTION * BLE_HID_WHEEL_RESOLUTION_MULTIPLIER);
 	zassert_equal(remainder, 0);
 }
@@ -143,7 +143,7 @@ ZTEST(encoder_math, test_negative_high_resolution_step_stays_signed)
 	zassert_equal(encoder_scroll_accumulate(
 		-(int16_t)(ENCODER_COUNTS_PER_SCROLL_DETENT /
 			BLE_HID_WHEEL_RESOLUTION_MULTIPLIER),
-		BLE_HID_WHEEL_RESOLUTION_MULTIPLIER, ENCODER_SCROLL_DIRECTION, &remainder),
+		BLE_HID_WHEEL_RESOLUTION_MULTIPLIER, ENCODER_SCROLL_DIRECTION, 100U, &remainder),
 		-ENCODER_SCROLL_DIRECTION);
 	zassert_equal(remainder, 0);
 }
@@ -157,7 +157,7 @@ ZTEST(encoder_math, test_runtime_resolution_modes_preserve_distance)
 
 		zassert_equal(encoder_scroll_accumulate(
 			ENCODER_COUNTS_PER_SCROLL_DETENT, multipliers[index],
-			ENCODER_SCROLL_DIRECTION, &remainder),
+			ENCODER_SCROLL_DIRECTION, 100U, &remainder),
 			ENCODER_SCROLL_DIRECTION *
 				BLE_HID_WHEEL_RESOLUTION_MULTIPLIER);
 		zassert_equal(remainder, 0);
@@ -168,18 +168,18 @@ ZTEST(encoder_math, test_runtime_resolution_modes_change_granularity)
 {
 	int32_t remainder = 0;
 
-	zassert_equal(encoder_scroll_accumulate(255, 1U, ENCODER_SCROLL_DIRECTION, &remainder), 0);
-	zassert_equal(encoder_scroll_accumulate(1, 1U, ENCODER_SCROLL_DIRECTION, &remainder),
+	zassert_equal(encoder_scroll_accumulate(255, 1U, ENCODER_SCROLL_DIRECTION, 100U, &remainder), 0);
+	zassert_equal(encoder_scroll_accumulate(1, 1U, ENCODER_SCROLL_DIRECTION, 100U, &remainder),
 		ENCODER_SCROLL_DIRECTION * 16);
 	zassert_equal(remainder, 0);
 
-	zassert_equal(encoder_scroll_accumulate(31, 8U, ENCODER_SCROLL_DIRECTION, &remainder), 0);
-	zassert_equal(encoder_scroll_accumulate(1, 8U, ENCODER_SCROLL_DIRECTION, &remainder),
+	zassert_equal(encoder_scroll_accumulate(31, 8U, ENCODER_SCROLL_DIRECTION, 100U, &remainder), 0);
+	zassert_equal(encoder_scroll_accumulate(1, 8U, ENCODER_SCROLL_DIRECTION, 100U, &remainder),
 		ENCODER_SCROLL_DIRECTION * 2);
 	zassert_equal(remainder, 0);
 
-	zassert_equal(encoder_scroll_accumulate(15, 16U, ENCODER_SCROLL_DIRECTION, &remainder), 0);
-	zassert_equal(encoder_scroll_accumulate(1, 16U, ENCODER_SCROLL_DIRECTION, &remainder),
+	zassert_equal(encoder_scroll_accumulate(15, 16U, ENCODER_SCROLL_DIRECTION, 100U, &remainder), 0);
+	zassert_equal(encoder_scroll_accumulate(1, 16U, ENCODER_SCROLL_DIRECTION, 100U, &remainder),
 		ENCODER_SCROLL_DIRECTION);
 	zassert_equal(remainder, 0);
 }
@@ -188,9 +188,9 @@ ZTEST(encoder_math, test_invalid_runtime_resolution_is_rejected)
 {
 	int32_t remainder = 7;
 
-	zassert_equal(encoder_scroll_accumulate(32, 0U, ENCODER_SCROLL_DIRECTION, &remainder), 0);
+	zassert_equal(encoder_scroll_accumulate(32, 0U, ENCODER_SCROLL_DIRECTION, 100U, &remainder), 0);
 	zassert_equal(remainder, 7);
-	zassert_equal(encoder_scroll_accumulate(32, 3U, ENCODER_SCROLL_DIRECTION, &remainder), 0);
+	zassert_equal(encoder_scroll_accumulate(32, 3U, ENCODER_SCROLL_DIRECTION, 100U, &remainder), 0);
 	zassert_equal(remainder, 7);
 }
 
@@ -207,13 +207,13 @@ ZTEST(encoder_math, test_runtime_scroll_direction_preserves_distance_and_sign)
 				BLE_HID_WHEEL_RESOLUTION_MULTIPLIER / multipliers[mode];
 
 			zassert_equal(encoder_scroll_accumulate(255, multipliers[mode],
-				direction, &remainder), direction * (multipliers[mode] - 1) *
+				direction, 100U, &remainder), direction * (multipliers[mode] - 1) *
 				units_per_step);
 			zassert_equal(encoder_scroll_accumulate(1, multipliers[mode],
-				direction, &remainder), direction * units_per_step);
+				direction, 100U, &remainder), direction * units_per_step);
 			zassert_equal(remainder, 0);
 			zassert_equal(encoder_scroll_accumulate(-256, multipliers[mode],
-				direction, &remainder), -direction *
+				direction, 100U, &remainder), -direction *
 				(int32_t)BLE_HID_WHEEL_RESOLUTION_MULTIPLIER);
 			zassert_equal(remainder, 0);
 		}
@@ -224,12 +224,93 @@ ZTEST(encoder_math, test_invalid_scroll_direction_preserves_remainder)
 {
 	int32_t remainder = 7;
 
-	zassert_equal(encoder_scroll_accumulate(256, 16U, 0, &remainder), 0);
+	zassert_equal(encoder_scroll_accumulate(256, 16U, 0, 100U, &remainder), 0);
 	zassert_equal(remainder, 7);
-	zassert_equal(encoder_scroll_accumulate(256, 16U, 2, &remainder), 0);
+	zassert_equal(encoder_scroll_accumulate(256, 16U, 2, 100U, &remainder), 0);
 	zassert_equal(remainder, 7);
-	zassert_equal(encoder_scroll_accumulate(256, 16U, -2, &remainder), 0);
+	zassert_equal(encoder_scroll_accumulate(256, 16U, -2, 100U, &remainder), 0);
 	zassert_equal(remainder, 7);
+}
+
+ZTEST(encoder_math, test_sensitivity_presets_scale_distance_in_every_resolution)
+{
+	const uint8_t multipliers[] = { 1U, 8U, 16U };
+	const uint8_t sensitivities[] = { 100U, 75U, 50U, 25U };
+	const int8_t directions[] = { 1, -1 };
+	const int32_t full_turn_units = ENCODER_ANGLE_MODULUS /
+		ENCODER_COUNTS_PER_SCROLL_DETENT * BLE_HID_WHEEL_RESOLUTION_MULTIPLIER;
+
+	for (size_t mode = 0U; mode < ARRAY_SIZE(multipliers); ++mode) {
+		for (size_t preset = 0U; preset < ARRAY_SIZE(sensitivities); ++preset) {
+			for (size_t sign = 0U; sign < ARRAY_SIZE(directions); ++sign) {
+				int32_t remainder = 0;
+				const int32_t expected = full_turn_units *
+					sensitivities[preset] / 100;
+
+				zassert_equal(encoder_scroll_accumulate(ENCODER_ANGLE_MODULUS,
+					multipliers[mode], directions[sign], sensitivities[preset],
+					&remainder), directions[sign] * expected);
+				zassert_equal(remainder, 0);
+			}
+		}
+	}
+}
+
+ZTEST(encoder_math, test_sensitivity_retains_fractional_slow_motion)
+{
+	const uint8_t multipliers[] = { 1U, 8U, 16U };
+	const uint8_t sensitivities[] = { 100U, 75U, 50U, 25U };
+	const int8_t directions[] = { 1, -1 };
+
+	for (size_t mode = 0U; mode < ARRAY_SIZE(multipliers); ++mode) {
+		for (size_t preset = 0U; preset < ARRAY_SIZE(sensitivities); ++preset) {
+			for (size_t sign = 0U; sign < ARRAY_SIZE(directions); ++sign) {
+				int32_t remainder = 0;
+				int32_t total = 0;
+				const int32_t expected = 128 * sensitivities[preset] / 100;
+
+				/* 2048 one-count samples represent eight legacy detents at 100%. */
+				for (size_t sample = 0U; sample < 2048U; ++sample) {
+					total += encoder_scroll_accumulate(directions[sign],
+						multipliers[mode], 1, sensitivities[preset], &remainder);
+				}
+				zassert_equal(total, directions[sign] * expected);
+				zassert_equal(remainder, 0);
+			}
+		}
+	}
+}
+
+ZTEST(encoder_math, test_sensitivity_reversal_cancels_fractional_motion)
+{
+	const uint8_t sensitivities[] = { 100U, 75U, 50U, 25U };
+	const int32_t deltas[] = { 43, -17, 2, -28 };
+
+	for (size_t preset = 0U; preset < ARRAY_SIZE(sensitivities); ++preset) {
+		int32_t remainder = 0;
+		int32_t total = 0;
+
+		for (size_t index = 0U; index < ARRAY_SIZE(deltas); ++index) {
+			total += encoder_scroll_accumulate(deltas[index], 16U, 1,
+				sensitivities[preset], &remainder);
+		}
+		zassert_equal(total, 0);
+		zassert_equal(remainder, 0);
+		zassert_equal(encoder_scroll_accumulate(0, 16U, 1,
+			sensitivities[preset], &remainder), 0);
+	}
+}
+
+ZTEST(encoder_math, test_invalid_sensitivity_preserves_remainder)
+{
+	const uint8_t invalid[] = { 0U, 1U, 24U, 26U, 99U, 101U, 255U };
+	int32_t remainder = 7;
+
+	for (size_t index = 0U; index < ARRAY_SIZE(invalid); ++index) {
+		zassert_equal(encoder_scroll_accumulate(256, 16U, 1,
+			invalid[index], &remainder), 0);
+		zassert_equal(remainder, 7);
+	}
 }
 
 ZTEST(encoder_math, test_acceleration_is_identity_when_disabled)
@@ -407,7 +488,7 @@ ZTEST(encoder_math, test_idle_samples_produce_no_scroll_tail)
 		zassert_equal(encoder_scroll_accumulate(
 			accelerated_delta,
 			BLE_HID_WHEEL_RESOLUTION_MULTIPLIER,
-			ENCODER_SCROLL_DIRECTION, &scroll_remainder), 0);
+			ENCODER_SCROLL_DIRECTION, 100U, &scroll_remainder), 0);
 	}
 }
 
