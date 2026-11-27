@@ -11,7 +11,9 @@
 #include "encoder.h"
 #include "encoder_mode.h"
 #include "scroll_acceleration.h"
+#include "scroll_direction.h"
 #include "scroll_resolution.h"
+#include "scroll_sensitivity.h"
 
 #if defined(CONFIG_BLESCROLL_RUNTIME_DIAGNOSTICS)
 #include <nrfx_power.h>
@@ -110,6 +112,10 @@ static void diagnostic_help_print(void)
 	printk("a  disable scroll acceleration and save (default)\r\n");
 	printk("V  use ADC encoder input and save\r\n");
 	printk("v  use I2C encoder input and save (default)\r\n");
+	printk("R  reverse scroll direction and save\r\n");
+	printk("S  cycle scroll sensitivity 100/75/50/25%% and save\r\n");
+	printk("Current direction: %s\r\n", scroll_direction_name_get());
+	printk("Current sensitivity: %u%%\r\n", scroll_sensitivity_get());
 	printk("Current resolution: %u (%s)\r\n",
 	       (unsigned int)scroll_resolution_get(),
 	       scroll_resolution_name_get());
@@ -159,6 +165,30 @@ static void diagnostic_encoder_mode_set(enum encoder_mode mode)
 
 	printk("\r\nEncoder source saved: %s\r\n", encoder_mode_name(mode));
 	encoder_source_diagnostic_print();
+}
+
+static void diagnostic_direction_toggle(void)
+{
+	const int err = scroll_direction_set(-scroll_direction_get());
+
+	if (err < 0) {
+		printk("\r\nScroll direction change failed (NVS): %d\r\n", err);
+		return;
+	}
+
+	printk("\r\nScroll direction saved: %s\r\n", scroll_direction_name_get());
+}
+
+static void diagnostic_sensitivity_cycle(void)
+{
+	const int err = scroll_sensitivity_cycle();
+
+	if (err < 0) {
+		printk("\r\nScroll sensitivity change failed (NVS): %d\r\n", err);
+		return;
+	}
+
+	printk("\r\nScroll sensitivity saved: %u%%\r\n", scroll_sensitivity_get());
 }
 
 static void diagnostic_disable(bool acknowledge)
@@ -220,6 +250,10 @@ static void diagnostic_command_work_handler(struct k_work *work)
 			diagnostic_encoder_mode_set(ENCODER_MODE_ADC);
 		} else if (command == 'v') {
 			diagnostic_encoder_mode_set(ENCODER_MODE_I2C);
+		} else if (command == 'R') {
+			diagnostic_direction_toggle();
+		} else if (command == 'S') {
+			diagnostic_sensitivity_cycle();
 		} else if ((command >= '0') && (command <= '2')) {
 			diagnostic_resolution_set(command);
 		}
@@ -249,6 +283,8 @@ static void diagnostic_uart_callback(const struct device *dev, void *user_data)
 			    (received[index] == 'h') ||
 			    (received[index] == 'A') || (received[index] == 'a') ||
 			    (received[index] == 'V') || (received[index] == 'v') ||
+			    (received[index] == 'R') ||
+			    (received[index] == 'S') ||
 			    ((received[index] >= '0') && (received[index] <= '2'))) {
 				if (k_msgq_put(&diagnostic_command_queue,
 					       &received[index], K_NO_WAIT) == 0) {
