@@ -5,7 +5,9 @@
 #include <zephyr/ztest.h>
 
 #include "encoder_mode.h"
+#include "app_config.h"
 #include "scroll_acceleration.h"
+#include "scroll_direction.h"
 #include "scroll_resolution.h"
 
 struct memory_value {
@@ -16,9 +18,13 @@ struct memory_value {
 static struct memory_value stored_resolution;
 static struct memory_value stored_acceleration;
 static struct memory_value stored_encoder_mode;
+static struct memory_value stored_direction;
 static struct settings_store memory_store;
 static bool fail_encoder_mode_save;
 static bool encoder_mode_bad_length;
+static bool fail_direction_save;
+static bool direction_bad_length;
+static ssize_t direction_read_result;
 
 static ssize_t memory_read_cb(void *cb_arg, void *data, size_t len)
 {
@@ -26,6 +32,10 @@ static ssize_t memory_read_cb(void *cb_arg, void *data, size_t len)
 
 	if (len < sizeof(value->value)) {
 		return -ENOMEM;
+	}
+	if ((value == &stored_direction) &&
+	    (direction_read_result != sizeof(value->value))) {
+		return direction_read_result;
 	}
 	*(uint8_t *)data = value->value;
 	return sizeof(value->value);
@@ -73,10 +83,16 @@ static int memory_load(struct settings_store *store,
 	if (err < 0) {
 		return err;
 	}
-	return memory_load_value(arg, "blescroll/encoder_mode",
+	err = memory_load_value(arg, "blescroll/encoder_mode",
 				 &stored_encoder_mode,
 				 encoder_mode_bad_length ? 2U :
 				 sizeof(stored_encoder_mode.value));
+	if (err < 0) {
+		return err;
+	}
+	return memory_load_value(arg, "blescroll/scroll_direction",
+				 &stored_direction, direction_bad_length ? 2U :
+				 sizeof(stored_direction.value));
 }
 
 static int memory_save(struct settings_store *store, const char *name,
@@ -94,6 +110,11 @@ static int memory_save(struct settings_store *store, const char *name,
 			return -EIO;
 		}
 		destination = &stored_encoder_mode;
+	} else if (strcmp(name, "blescroll/scroll_direction") == 0) {
+		if (fail_direction_save) {
+			return -EIO;
+		}
+		destination = &stored_direction;
 	} else {
 		return -ENOENT;
 	}
@@ -129,8 +150,12 @@ static void scroll_settings_before(void *fixture)
 	};
 	stored_acceleration = (struct memory_value) { 0 };
 	stored_encoder_mode = (struct memory_value) { 0 };
+	stored_direction = (struct memory_value) { 0 };
 	fail_encoder_mode_save = false;
 	encoder_mode_bad_length = false;
+	fail_direction_save = false;
+	direction_bad_length = false;
+	direction_read_result = sizeof(stored_direction.value);
 }
 
 ZTEST_SUITE(scroll_settings, NULL, scroll_settings_setup,
@@ -142,6 +167,7 @@ ZTEST(scroll_settings, test_old_nvs_defaults_acceleration_to_off)
 	zassert_equal(scroll_resolution_get(), SCROLL_RESOLUTION_MODE_X8);
 	zassert_false(scroll_acceleration_get());
 	zassert_equal(encoder_mode_get(), ENCODER_MODE_I2C);
+	zassert_equal(scroll_direction_get(), ENCODER_SCROLL_DIRECTION);
 }
 
 ZTEST(scroll_settings, test_acceleration_survives_reload)
@@ -207,4 +233,73 @@ ZTEST(scroll_settings, test_encoder_mode_changes_only_after_successful_save)
 
 	zassert_equal(encoder_mode_set(ENCODER_MODE_ADC), -EIO);
 	zassert_equal(encoder_mode_get(), ENCODER_MODE_I2C);
+}
+
+ZTEST(scroll_settings, test_scroll_directions_survive_reload)
+{
+	zassert_ok(scroll_resolution_init());
+	/* The same read/negate/set operation is used by command R. */
+	zassert_ok(scroll_direction_set(-scroll_direction_get()));
+	zassert_true(stored_direction.present);
+	zassert_equal(stored_direction.value, ENCODER_SCROLL_DIRECTION > 0 ? 1U : 0U);
+	zassert_ok(scroll_resolution_init());
+	zassert_equal(scroll_direction_get(), -ENCODER_SCROLL_DIRECTION);
+
+	zassert_ok(scroll_direction_set(-scroll_direction_get()));
+	zassert_ok(scroll_resolution_init());
+	zassert_equal(scroll_direction_get(), ENCODER_SCROLL_DIRECTION);
+	zassert_equal(scroll_resolution_get(), SCROLL_RESOLUTION_MODE_X8);
+	zassert_false(scroll_acceleration_get());
+	zassert_equal(encoder_mode_get(), ENCODER_MODE_I2C);
+}
+
+ZTEST(scroll_settings, test_invalid_scroll_direction_is_ignored)
+{
+	stored_direction = (struct memory_value) {
+		.present = true,
+		.value = 0xffU,
+	};
+
+	zassert_ok(scroll_resolution_init());
+	zassert_equal(scroll_direction_get(), ENCODER_SCROLL_DIRECTION);
+}
+
+ZTEST(scroll_settings, test_malformed_scroll_direction_is_ignored)
+{
+	stored_direction = (struct memory_value) {
+		.present = true,
+		.value = ENCODER_SCROLL_DIRECTION > 0 ? 1U : 0U,
+	};
+	direction_bad_length = true;
+	zassert_ok(scroll_resolution_init());
+	zassert_equal(scroll_direction_get(), ENCODER_SCROLL_DIRECTION);
+
+	direction_bad_length = false;
+	direction_read_result = -EIO;
+	zassert_ok(scroll_resolution_init());
+	zassert_equal(scroll_direction_get(), ENCODER_SCROLL_DIRECTION);
+
+	direction_read_result = 0;
+	zassert_ok(scroll_resolution_init());
+	zassert_equal(scroll_direction_get(), ENCODER_SCROLL_DIRECTION);
+}
+
+ZTEST(scroll_settings, test_scroll_direction_changes_only_after_successful_save)
+{
+	zassert_ok(scroll_resolution_init());
+	fail_direction_save = true;
+
+	zassert_equal(scroll_direction_set(-ENCODER_SCROLL_DIRECTION), -EIO);
+	zassert_equal(scroll_direction_get(), ENCODER_SCROLL_DIRECTION);
+	zassert_false(stored_direction.present);
+}
+
+ZTEST(scroll_settings, test_invalid_scroll_direction_is_rejected)
+{
+	zassert_ok(scroll_resolution_init());
+	zassert_equal(scroll_direction_set(0), -EINVAL);
+	zassert_equal(scroll_direction_set(2), -EINVAL);
+	zassert_equal(scroll_direction_set(-2), -EINVAL);
+	zassert_equal(scroll_direction_get(), ENCODER_SCROLL_DIRECTION);
+	zassert_false(stored_direction.present);
 }

@@ -180,14 +180,15 @@ int encoder_angle_filter(const uint16_t samples[ENCODER_FILTER_SAMPLE_COUNT],
 }
 
 int32_t encoder_scroll_accumulate(int32_t delta, uint8_t resolution_multiplier,
-				  int32_t *remainder)
+				  int8_t direction, int32_t *remainder)
 {
-	const int32_t directed_delta = (int32_t)delta * ENCODER_SCROLL_DIRECTION;
+	const int32_t directed_delta = delta * direction;
 	int32_t counts_per_step;
 	int32_t report_units_per_step;
 	int32_t scroll_delta;
 
-	if ((remainder == NULL) || (resolution_multiplier == 0U) ||
+	if ((remainder == NULL) || ((direction != 1) && (direction != -1)) ||
+	    (resolution_multiplier == 0U) ||
 	    ((BLE_HID_WHEEL_RESOLUTION_MULTIPLIER % resolution_multiplier) != 0U) ||
 	    ((ENCODER_COUNTS_PER_SCROLL_DETENT % resolution_multiplier) != 0U)) {
 		return 0;

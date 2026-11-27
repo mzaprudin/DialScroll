@@ -1,7 +1,9 @@
 #include "scroll_resolution.h"
 
 #include "scroll_acceleration.h"
+#include "scroll_direction.h"
 #include "encoder_mode.h"
+#include "app_config.h"
 
 #include <errno.h>
 #include <string.h>
@@ -21,11 +23,14 @@ LOG_MODULE_REGISTER(scroll_resolution, LOG_LEVEL_INF);
 #define ENCODER_MODE_SETTINGS_NAME "encoder_mode"
 #define ENCODER_MODE_SETTINGS_KEY \
 	SCROLL_SETTINGS_SUBTREE "/" ENCODER_MODE_SETTINGS_NAME
+#define DIRECTION_SETTINGS_NAME "scroll_direction"
+#define DIRECTION_SETTINGS_KEY SCROLL_SETTINGS_SUBTREE "/" DIRECTION_SETTINGS_NAME
 
 static atomic_t current_mode = ATOMIC_INIT(SCROLL_RESOLUTION_DEFAULT_MODE);
 static atomic_t acceleration_enabled =
 	ATOMIC_INIT(SCROLL_ACCELERATION_DEFAULT_ENABLED ? 1 : 0);
 static atomic_t encoder_mode = ATOMIC_INIT(ENCODER_MODE_DEFAULT);
+static atomic_t scroll_direction = ATOMIC_INIT(ENCODER_SCROLL_DIRECTION);
 static atomic_t settings_ready;
 
 static bool scroll_resolution_mode_valid(uint8_t mode)
@@ -46,6 +51,8 @@ static int scroll_settings_set(const char *name, size_t len,
 	bool is_resolution;
 	bool is_acceleration;
 	bool is_encoder_mode;
+	bool is_direction;
+	const char *optional_name;
 	ssize_t read;
 
 	is_resolution = settings_name_steq(name, SCROLL_SETTINGS_NAME, &next) &&
@@ -54,13 +61,16 @@ static int scroll_settings_set(const char *name, size_t len,
 		name, ACCELERATION_SETTINGS_NAME, &next) && next == NULL;
 	is_encoder_mode = settings_name_steq(
 		name, ENCODER_MODE_SETTINGS_NAME, &next) && next == NULL;
-	if (!is_resolution && !is_acceleration && !is_encoder_mode) {
+	is_direction = settings_name_steq(
+		name, DIRECTION_SETTINGS_NAME, &next) && next == NULL;
+	optional_name = is_encoder_mode ? "encoder mode" : "scroll direction";
+	if (!is_resolution && !is_acceleration && !is_encoder_mode && !is_direction) {
 		return -ENOENT;
 	}
 	if (len != sizeof(stored_mode)) {
-		if (is_encoder_mode) {
-			LOG_WRN("Ignoring stored encoder mode with invalid length %u",
-				(unsigned int)len);
+		if (is_encoder_mode || is_direction) {
+			LOG_WRN("Ignoring stored %s with invalid length %u",
+				optional_name, (unsigned int)len);
 			return 0;
 		}
 		return -EINVAL;
@@ -68,16 +78,16 @@ static int scroll_settings_set(const char *name, size_t len,
 
 	read = read_cb(cb_arg, &stored_mode, sizeof(stored_mode));
 	if (read < 0) {
-		if (is_encoder_mode) {
-			LOG_WRN("Ignoring unreadable stored encoder mode: %d",
-				(int)read);
+		if (is_encoder_mode || is_direction) {
+			LOG_WRN("Ignoring unreadable stored %s: %d",
+				optional_name, (int)read);
 			return 0;
 		}
 		return (int)read;
 	}
 	if (read != sizeof(stored_mode)) {
-		if (is_encoder_mode) {
-			LOG_WRN("Ignoring truncated stored encoder mode");
+		if (is_encoder_mode || is_direction) {
+			LOG_WRN("Ignoring truncated stored %s", optional_name);
 			return 0;
 		}
 		return -EINVAL;
@@ -100,6 +110,16 @@ static int scroll_settings_set(const char *name, size_t len,
 		}
 
 		atomic_set(&acceleration_enabled, stored_mode);
+		return 0;
+	}
+	if (is_direction) {
+		if (stored_mode > 1U) {
+			LOG_WRN("Ignoring invalid stored scroll direction %u", stored_mode);
+			return 0;
+		}
+
+		/* Store 0 for +1 and 1 for -1, without signed-byte conversions. */
+		atomic_set(&scroll_direction, stored_mode == 0U ? 1 : -1);
 		return 0;
 	}
 	if (is_encoder_mode) {
@@ -126,6 +146,7 @@ int scroll_resolution_init(void)
 	atomic_set(&acceleration_enabled,
 		   SCROLL_ACCELERATION_DEFAULT_ENABLED ? 1 : 0);
 	atomic_set(&encoder_mode, ENCODER_MODE_DEFAULT);
+	atomic_set(&scroll_direction, ENCODER_SCROLL_DIRECTION);
 
 	if (!IS_ENABLED(CONFIG_SETTINGS)) {
 		atomic_set(&settings_ready, 1);
@@ -142,9 +163,9 @@ int scroll_resolution_init(void)
 	}
 
 	atomic_set(&settings_ready, 1);
-	LOG_INF("Settings loaded: resolution=%s acceleration=%s encoder=%s",
+	LOG_INF("Settings loaded: resolution=%s acceleration=%s encoder=%s direction=%s",
 		scroll_resolution_name_get(), scroll_acceleration_name_get(),
-		encoder_mode_name(encoder_mode_get()));
+		encoder_mode_name(encoder_mode_get()), scroll_direction_name_get());
 	return 0;
 }
 
@@ -233,6 +254,40 @@ bool scroll_acceleration_get(void)
 const char *scroll_acceleration_name_get(void)
 {
 	return scroll_acceleration_get() ? "enabled" : "disabled";
+}
+
+int scroll_direction_set(int8_t direction)
+{
+	const uint8_t stored_reversed = direction < 0 ? 1U : 0U;
+	int err;
+
+	if ((direction != 1) && (direction != -1)) {
+		return -EINVAL;
+	}
+	if (!atomic_get(&settings_ready)) {
+		return -EAGAIN;
+	}
+	if (IS_ENABLED(CONFIG_SETTINGS)) {
+		err = settings_save_one(DIRECTION_SETTINGS_KEY, &stored_reversed,
+					sizeof(stored_reversed));
+		if (err < 0) {
+			return err;
+		}
+	}
+
+	atomic_set(&scroll_direction, direction);
+	LOG_INF("Scroll direction changed to %s", scroll_direction_name_get());
+	return 0;
+}
+
+int8_t scroll_direction_get(void)
+{
+	return (int8_t)atomic_get(&scroll_direction);
+}
+
+const char *scroll_direction_name_get(void)
+{
+	return scroll_direction_get() > 0 ? "normal (+1)" : "reversed (-1)";
 }
 
 int encoder_mode_set(enum encoder_mode mode)

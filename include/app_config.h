@@ -41,6 +41,7 @@
 #define ENCODER_IDLE_MOTION_THRESHOLD_COUNTS 32
 #define ENCODER_ACTIVE_NOISE_COUNTS          16
 #define ENCODER_COUNTS_PER_SCROLL_DETENT     256
+/* Default only; the USB R command saves a runtime override in NVS. */
 #define ENCODER_SCROLL_DIRECTION             1
 
 /* Optional scroll acceleration. All multipliers use unsigned Q8. */
